@@ -37,10 +37,28 @@ In your Railway project, go to **Variables** and add:
 | `NINJA_API_BASE_URL` | `https://your-instance.rmmservices.net/api/v2` |
 | `NINJA_CLIENT_ID` | from Step 1 |
 | `NINJA_CLIENT_SECRET` | from Step 1 |
-| `MCP_SHARED_SECRET` | a long random string — generate one with `openssl rand -hex 32` |
+| `MCP_SHARED_SECRET` | a long random string — see below for how to generate one |
 | `DEFAULT_TICKET_FORM_ID` | leave blank for now (see Step 5) |
 | `DEFAULT_BOARD_ID` | leave blank for now (see Step 5) |
 | `TECHNICIAN_EMAIL` | your NinjaOne login email (see below) |
+
+#### Generating your `MCP_SHARED_SECRET`
+
+Before you set `MCP_SHARED_SECRET`, deploy the service once without it. Then visit:
+
+```
+https://your-service.up.railway.app/generate-secret
+```
+
+You'll get a ready-to-paste value:
+
+```json
+{
+  "MCP_SHARED_SECRET": "a1b2c3d4..."
+}
+```
+
+Copy that value into Railway's Variables tab. Once `MCP_SHARED_SECRET` is set and the service redeploys, the `/generate-secret` endpoint disables itself permanently — it will return a 403 if called again.
 
 > `PORT` is injected automatically by Railway. Do not set it manually.
 
