@@ -4,15 +4,89 @@ export interface NinjaOrganization {
   [key: string]: unknown;
 }
 
+export interface NinjaContact {
+  id: number;
+  clientId: number;
+  uid: string;
+  firstName?: string;
+  lastName?: string;
+  email?: string;
+  phone?: string;
+  jobTitle?: string;
+}
+
+export interface NinjaTicket {
+  id: number;
+  version: number;
+  clientId: number;
+  ticketFormId?: number;
+  locationId?: number;
+  nodeId?: number;
+  summary: string;
+  status: TicketStatus;
+  type?: TicketType;
+  source?: string;
+  priority?: number;
+  severity?: number;
+  assignedAppUserId?: number;
+  requesterUid?: string;
+  tags?: string[];
+  createTime?: number;
+  deleted?: boolean;
+  attributeValues?: unknown[];
+  ccList?: { uids?: string[]; emails?: string[] };
+  [key: string]: unknown;
+}
+
+export interface NinjaTicketLogEntry {
+  id: number;
+  appUserContactUid?: string;
+  type: "DESCRIPTION" | "COMMENT" | "CONDITION" | "SAVE" | "DELETE";
+  body?: string;
+  htmlBody?: string;
+  publicEntry?: boolean;
+  createTime?: number;
+  timeTracked?: number;
+}
+
+export type TicketStatus = "NEW" | "OPEN" | "WAITING" | "PAUSED" | "RESOLVED" | "CLOSED";
+export type TicketType = "PROBLEM" | "QUESTION" | "INCIDENT" | "TASK";
+export type TicketPriority = "NONE" | "LOW" | "MEDIUM" | "HIGH";
+export type TicketSeverity = "NONE" | "MINOR" | "MODERATE" | "MAJOR" | "CRITICAL";
+
+export interface TicketComment {
+  body: string;
+  htmlBody?: string;
+  public?: boolean;
+  timeTracked?: number;
+}
+
 export interface CreateTicketInput {
   organization_name?: string;
   organization_id?: number;
-  subject: string;
+  organization_domain?: string;
+  summary: string;
   description: string;
-  priority?: string;
+  type?: TicketType;
+  priority?: TicketPriority;
+  severity?: TicketSeverity;
+  status?: TicketStatus;
   requester_email?: string;
   form_id?: number;
   board_id?: number;
+  tags?: string[];
+}
+
+export interface UpdateTicketInput {
+  ticket_id: number;
+  summary?: string;
+  status?: TicketStatus;
+  type?: TicketType;
+  priority?: TicketPriority;
+  severity?: TicketSeverity;
+  assigned_app_user_id?: number;
+  comment_body?: string;
+  comment_public?: boolean;
 }
 
 export interface NinjaTokenResponse {
