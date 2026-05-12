@@ -1,16 +1,94 @@
 # NinjaOne Ticketing MCP Server
 
-An MCP server that lets Claude create and manage NinjaOne support tickets using natural language. Deploy it on Railway and point any MCP-compatible client at it.
+An MCP server that lets Claude create and manage NinjaOne support tickets using natural language. Deployed on Railway, connected to Claude Desktop (or any MCP client) in minutes.
 
-## Features
+**Example prompts once connected:**
+- *"Create a ticket for Acme Corp — their email is down"*
+- *"Add a note to ticket 1042 saying we're waiting on the vendor"*
+- *"Close ticket 1038 and mark it resolved"*
+- *"Find the org for someone@clientdomain.com and open a high-priority incident"*
 
-- Create tickets — resolve the client org by name, email domain, or numeric ID
-- Update tickets — change status, priority, severity, type, assignee
-- Add comments — public replies or internal technician notes
-- Look up organizations, contacts, forms, boards, and statuses
-- Domain-based org resolution — give Claude an email address and it finds the right client
+---
 
-## Tools exposed over `/mcp`
+## Setup
+
+### Step 1 — Create NinjaOne API credentials
+
+1. Log into NinjaOne and go to **Administration → Apps → API**
+2. Click **Add** to create a new API application
+3. Set the grant type to **Client Credentials**
+4. Copy the **Client ID** and **Client Secret** — you'll need them in Step 3
+5. Note your instance base URL — it's the domain you use to log in, e.g. `https://your-instance.rmmservices.net`
+
+### Step 2 — Deploy to Railway
+
+1. Fork this repo to your GitHub account
+2. Go to [railway.app](https://railway.app) and create a new project
+3. Choose **Deploy from GitHub repo** and select your fork
+4. Railway detects the `Dockerfile` and builds automatically — no extra config needed
+
+### Step 3 — Set environment variables in Railway
+
+In your Railway project, go to **Variables** and add:
+
+| Variable | Value |
+|---|---|
+| `NINJA_TOKEN_URL` | `https://your-instance.rmmservices.net/oauth/token` |
+| `NINJA_API_BASE_URL` | `https://your-instance.rmmservices.net/api/v2` |
+| `NINJA_CLIENT_ID` | from Step 1 |
+| `NINJA_CLIENT_SECRET` | from Step 1 |
+| `MCP_SHARED_SECRET` | a long random string — generate one with `openssl rand -hex 32` |
+| `DEFAULT_TICKET_FORM_ID` | leave blank for now (see Step 5) |
+| `DEFAULT_BOARD_ID` | leave blank for now (see Step 5) |
+
+> `PORT` is injected automatically by Railway. Do not set it manually.
+
+After saving variables Railway will redeploy. Once it's green, confirm it's working:
+
+```
+GET https://your-service.up.railway.app/health
+```
+
+### Step 4 — Connect to Claude Desktop
+
+Open your Claude Desktop config file:
+- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+
+Add this entry under `mcpServers`:
+
+```json
+{
+  "mcpServers": {
+    "ninjaone": {
+      "type": "http",
+      "url": "https://your-service.up.railway.app/mcp",
+      "headers": {
+        "Authorization": "Bearer your_MCP_SHARED_SECRET"
+      }
+    }
+  }
+}
+```
+
+Restart Claude Desktop. You should see the NinjaOne tools appear in the tools list.
+
+### Step 5 — (Optional) Set default form and board IDs
+
+If you always want tickets to land on a specific board or use a specific form without having to specify it every time, ask Claude:
+
+> *"List the NinjaOne ticket forms"*
+> *"List the NinjaOne ticket boards"*
+
+Then go back to Railway **Variables** and set:
+- `DEFAULT_TICKET_FORM_ID` — the numeric ID of your preferred form
+- `DEFAULT_BOARD_ID` — the numeric ID of your preferred board
+
+Railway will redeploy automatically.
+
+---
+
+## Available tools
 
 | Tool | What it does |
 |---|---|
@@ -25,73 +103,29 @@ An MCP server that lets Claude create and manage NinjaOne support tickets using 
 | `ninja_list_ticket_boards` | List available boards |
 | `ninja_list_ticket_statuses` | List configured statuses |
 
-## Deploy to Railway
-
-### 1. Fork / clone this repo
-
-### 2. Create a new Railway project from your GitHub repo
-
-Railway will detect the `Dockerfile` and build automatically.
-
-### 3. Set environment variables in Railway
-
-```
-NINJA_TOKEN_URL=https://your-instance.rmmservices.net/oauth/token
-NINJA_API_BASE_URL=https://your-instance.rmmservices.net/api/v2
-NINJA_CLIENT_ID=your_client_id
-NINJA_CLIENT_SECRET=your_client_secret
-MCP_SHARED_SECRET=a_long_random_secret
-DEFAULT_TICKET_FORM_ID=
-DEFAULT_BOARD_ID=
-```
-
-> **Tip:** Generate a strong secret with `openssl rand -hex 32`
-
-`PORT` is set automatically by Railway — do not override it.
-
-### 4. Your MCP endpoint
-
-Once deployed:
-
-```
-https://your-service.up.railway.app/mcp
-```
-
-Configure your MCP client with:
-```
-Authorization: Bearer <your MCP_SHARED_SECRET>
-```
-
-### Health check
-
-```
-GET https://your-service.up.railway.app/health
-```
+---
 
 ## Local development
 
 ```bash
 cp .env.example .env
-# Fill in your values in .env
+# Edit .env with your values
 npm install
 npm run dev
 ```
 
-Then hit `http://localhost:3000/health` to confirm it's running.
+Confirm it's running:
+```bash
+curl http://localhost:3000/health
+```
 
-To test the NinjaOne connection:
-
+Test the NinjaOne connection:
 ```bash
 curl -H "Authorization: Bearer your_MCP_SHARED_SECRET" \
      http://localhost:3000/debug/test-ninja
 ```
 
-## NinjaOne API credentials
-
-1. In NinjaOne go to **Administration → Apps → API**
-2. Create a new application with the **Client Credentials** grant type
-3. Copy the **Client ID** and **Client Secret** into your environment variables
-4. The token URL and API base URL follow the pattern in `.env.example`
+---
 
 ## License
 
