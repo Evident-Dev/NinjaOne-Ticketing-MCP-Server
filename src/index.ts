@@ -2,7 +2,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { loadConfig } from "./config.js";
+import { getMissingVars, loadConfig } from "./config.js";
 import { NinjaClient } from "./ninja.js";
 
 const config = loadConfig();
@@ -241,11 +241,16 @@ const app = express();
 app.use(express.json({ limit: "1mb" }));
 
 app.get("/health", (_req: Request, res: Response) => {
-  res.json({ ok: true, service: "ninja-ticket-mcp-server", version: "0.2.0" });
+  const missing = getMissingVars();
+  if (missing.length > 0) {
+    res.json({ ok: true, configured: false, missing, service: "ninja-ticket-mcp-server", version: "0.2.0" });
+    return;
+  }
+  res.json({ ok: true, configured: true, service: "ninja-ticket-mcp-server", version: "0.2.0" });
 });
 
 
-app.get("/debug/test-ninja", requireSharedSecret, async (_req: Request, res: Response, next: NextFunction) => {
+app.get("/debug/test-ninja", requireSharedSecret, requireConfigured, async (_req: Request, res: Response, next: NextFunction) => {
   try {
     res.json(await ninja.testConnection());
   } catch (error) {
@@ -253,7 +258,7 @@ app.get("/debug/test-ninja", requireSharedSecret, async (_req: Request, res: Res
   }
 });
 
-app.post("/mcp", requireSharedSecret, async (req: Request, res: Response) => {
+app.post("/mcp", requireSharedSecret, requireConfigured, async (req: Request, res: Response) => {
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true
@@ -291,6 +296,15 @@ app.listen(config.port, () => {
 });
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+function requireConfigured(_req: Request, res: Response, next: NextFunction): void {
+  const missing = getMissingVars();
+  if (missing.length > 0) {
+    res.status(503).json({ ok: false, error: "Server is not fully configured. Set the following Railway variables and redeploy.", missing });
+    return;
+  }
+  next();
+}
 
 function requireSharedSecret(req: Request, res: Response, next: NextFunction): void {
   if (!config.mcpSharedSecret) {

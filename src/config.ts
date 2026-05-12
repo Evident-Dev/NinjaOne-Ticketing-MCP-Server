@@ -10,31 +10,31 @@ export interface AppConfig {
   technicianEmail?: string;
 }
 
-function required(name: string): string {
-  const value = process.env[name];
-  if (!value || !value.trim()) {
-    throw new Error(`Missing required environment variable: ${name}`);
-  }
-  return value.trim();
+const REQUIRED = ["NINJA_TOKEN_URL", "NINJA_API_BASE_URL", "NINJA_CLIENT_ID", "NINJA_CLIENT_SECRET"] as const;
+
+export function getMissingVars(): string[] {
+  return REQUIRED.filter((name) => !process.env[name]?.trim());
+}
+
+function optional(name: string): string {
+  return process.env[name]?.trim() ?? "";
 }
 
 function optionalNumber(name: string): number | undefined {
   const value = process.env[name];
   if (!value || !value.trim()) return undefined;
   const parsed = Number(value);
-  if (!Number.isFinite(parsed)) {
-    throw new Error(`${name} must be a number if set`);
-  }
+  if (!Number.isFinite(parsed)) return undefined;
   return parsed;
 }
 
 export function loadConfig(): AppConfig {
   return {
     port: Number(process.env.PORT || 3000),
-    ninjaTokenUrl: required("NINJA_TOKEN_URL"),
-    ninjaApiBaseUrl: required("NINJA_API_BASE_URL").replace(/\/$/, ""),
-    ninjaClientId: required("NINJA_CLIENT_ID"),
-    ninjaClientSecret: required("NINJA_CLIENT_SECRET"),
+    ninjaTokenUrl: optional("NINJA_TOKEN_URL"),
+    ninjaApiBaseUrl: optional("NINJA_API_BASE_URL").replace(/\/$/, ""),
+    ninjaClientId: optional("NINJA_CLIENT_ID"),
+    ninjaClientSecret: optional("NINJA_CLIENT_SECRET"),
     mcpSharedSecret: process.env.MCP_SHARED_SECRET?.trim() || undefined,
     defaultTicketFormId: optionalNumber("DEFAULT_TICKET_FORM_ID"),
     defaultBoardId: optionalNumber("DEFAULT_BOARD_ID"),
