@@ -159,7 +159,7 @@ export class NinjaClient {
   }
 
   async listTicketBoards(): Promise<unknown> {
-    return this.request<unknown>("/ticketing/ticket-board", "GET");
+    return this.request<unknown>("/ticketing/boards", "GET");
   }
 
   async listTicketStatuses(): Promise<unknown> {
@@ -281,7 +281,7 @@ export class NinjaClient {
     return this.token.accessToken;
   }
 
-  private async request<T>(path: string, method: "GET" | "POST" | "PUT", body?: unknown): Promise<T> {
+  async request<T>(path: string, method: "GET" | "POST" | "PUT", body?: unknown): Promise<T> {
     const token = await this.getAccessToken();
     const url = `${this.config.ninjaApiBaseUrl}${path}`;
 
