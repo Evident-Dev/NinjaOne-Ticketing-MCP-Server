@@ -44,21 +44,13 @@ In your Railway project, go to **Variables** and add:
 
 #### Generating your `MCP_SHARED_SECRET`
 
-Before you set `MCP_SHARED_SECRET`, deploy the service once without it. Then visit:
+Run this in your terminal before you deploy — Node.js is already required for this project:
 
-```
-https://your-service.up.railway.app/generate-secret
-```
-
-You'll get a ready-to-paste value:
-
-```json
-{
-  "MCP_SHARED_SECRET": "a1b2c3d4..."
-}
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 ```
 
-Copy that value into Railway's Variables tab. Once `MCP_SHARED_SECRET` is set and the service redeploys, the `/generate-secret` endpoint disables itself permanently — it will return a 403 if called again.
+Copy the output and paste it as the `MCP_SHARED_SECRET` value in Railway. That's it.
 
 > `PORT` is injected automatically by Railway. Do not set it manually.
 

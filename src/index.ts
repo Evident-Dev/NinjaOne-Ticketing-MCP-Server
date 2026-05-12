@@ -1,4 +1,3 @@
-import crypto from "crypto";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -245,20 +244,6 @@ app.get("/health", (_req: Request, res: Response) => {
   res.json({ ok: true, service: "ninja-ticket-mcp-server", version: "0.2.0" });
 });
 
-// One-time helper: visit this in a browser to get a ready-to-paste secret.
-// It only works while MCP_SHARED_SECRET is not yet set, so it can't leak an existing secret.
-app.get("/generate-secret", (_req: Request, res: Response) => {
-  if (config.mcpSharedSecret) {
-    res.status(403).json({ ok: false, error: "MCP_SHARED_SECRET is already configured. This endpoint is disabled." });
-    return;
-  }
-  const secret = crypto.randomBytes(32).toString("hex");
-  res.json({
-    ok: true,
-    message: "Copy the value below and set it as MCP_SHARED_SECRET in Railway.",
-    MCP_SHARED_SECRET: secret
-  });
-});
 
 app.get("/debug/test-ninja", requireSharedSecret, async (_req: Request, res: Response, next: NextFunction) => {
   try {
