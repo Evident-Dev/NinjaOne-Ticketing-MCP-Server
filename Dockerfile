@@ -3,8 +3,8 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-COPY package.json package-lock.json ./
-RUN npm ci
+COPY package*.json ./
+RUN npm install
 
 COPY tsconfig.json ./
 COPY src ./src
@@ -16,8 +16,8 @@ FROM node:20-alpine AS production
 WORKDIR /app
 
 # Install only production dependencies
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+COPY package*.json ./
+RUN npm install --omit=dev
 
 # Copy compiled output from build stage
 COPY --from=builder /app/dist ./dist
