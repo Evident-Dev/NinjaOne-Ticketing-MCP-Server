@@ -159,7 +159,7 @@ export class NinjaClient {
   }
 
   async listTicketBoards(): Promise<unknown> {
-    return this.request<unknown>("/ticketing/board", "GET");
+    return this.request<unknown>("/ticketing/ticket-board", "GET");
   }
 
   async listTicketStatuses(): Promise<unknown> {
