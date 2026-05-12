@@ -4,6 +4,15 @@ export interface NinjaOrganization {
   [key: string]: unknown;
 }
 
+export interface NinjaUser {
+  id: number;
+  firstName?: string;
+  lastName?: string;
+  email?: string;
+  userType?: "TECHNICIAN" | "END_USER";
+  enabled?: boolean;
+}
+
 export interface NinjaContact {
   id: number;
   clientId: number;

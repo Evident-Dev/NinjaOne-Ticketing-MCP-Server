@@ -97,6 +97,23 @@ server.registerTool(
 );
 
 server.registerTool(
+  "ninja_whoami",
+  {
+    title: "NinjaOne Technician Identity",
+    description: "Returns the NinjaOne technician profile this server is configured to act as (set via TECHNICIAN_EMAIL). Use this to confirm whose name will appear on tickets and comments, or to check if technician attribution is configured.",
+    inputSchema: z.object({}).strict(),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  },
+  async () => {
+    const profile = await ninja.getTechnicianProfile();
+    if (!profile) {
+      return jsonResult({ configured: false, message: "TECHNICIAN_EMAIL is not set. Tickets will not be auto-assigned and comments will not be signed." });
+    }
+    return jsonResult({ configured: true, display_name: profile.displayName, email: profile.email, ninja_user_id: profile.appUserId });
+  }
+);
+
+server.registerTool(
   "ninja_list_ticket_statuses",
   {
     title: "List NinjaOne Ticket Statuses",

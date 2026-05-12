@@ -7,6 +7,7 @@ export interface AppConfig {
   mcpSharedSecret?: string;
   defaultTicketFormId?: number;
   defaultBoardId?: number;
+  technicianEmail?: string;
 }
 
 function required(name: string): string {
@@ -36,6 +37,7 @@ export function loadConfig(): AppConfig {
     ninjaClientSecret: required("NINJA_CLIENT_SECRET"),
     mcpSharedSecret: process.env.MCP_SHARED_SECRET?.trim() || undefined,
     defaultTicketFormId: optionalNumber("DEFAULT_TICKET_FORM_ID"),
-    defaultBoardId: optionalNumber("DEFAULT_BOARD_ID")
+    defaultBoardId: optionalNumber("DEFAULT_BOARD_ID"),
+    technicianEmail: process.env.TECHNICIAN_EMAIL?.trim() || undefined
   };
 }

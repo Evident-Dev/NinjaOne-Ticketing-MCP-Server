@@ -5,6 +5,7 @@ import type {
   NinjaOrganization,
   NinjaTicket,
   NinjaTokenResponse,
+  NinjaUser,
   TicketComment,
   TicketPriority,
   TicketSeverity,
@@ -21,12 +22,21 @@ interface CachedList<T> {
   fetchedAtMs: number;
 }
 
+interface TechnicianProfile {
+  appUserId: number;
+  firstName?: string;
+  lastName?: string;
+  email: string;
+  displayName: string;
+}
+
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
 export class NinjaClient {
   private token?: CachedToken;
   private orgCache?: CachedList<NinjaOrganization>;
   private contactCache?: CachedList<NinjaContact>;
+  private technicianProfile?: TechnicianProfile | null;
 
   constructor(private readonly config: AppConfig) {}
 
@@ -112,6 +122,36 @@ export class NinjaClient {
     return orgs.filter((org) => clientIds.includes(org.id));
   }
 
+  // ── Technician identity ───────────────────────────────────────────────────
+
+  async getTechnicianProfile(): Promise<TechnicianProfile | null> {
+    if (this.technicianProfile !== undefined) return this.technicianProfile;
+    if (!this.config.technicianEmail) {
+      this.technicianProfile = null;
+      return null;
+    }
+
+    const users = await this.request<unknown>("/users", "GET");
+    const list = Array.isArray(users) ? (users as unknown[]).filter(isUser) : [];
+    const match = list.find((u) => u.email?.toLowerCase() === this.config.technicianEmail!.toLowerCase());
+
+    if (!match) {
+      console.warn(`TECHNICIAN_EMAIL "${this.config.technicianEmail}" not found in NinjaOne users.`);
+      this.technicianProfile = null;
+      return null;
+    }
+
+    const displayName = [match.firstName, match.lastName].filter(Boolean).join(" ") || match.email!;
+    this.technicianProfile = {
+      appUserId: match.id,
+      firstName: match.firstName,
+      lastName: match.lastName,
+      email: match.email!,
+      displayName
+    };
+    return this.technicianProfile;
+  }
+
   // ── Ticket forms & boards ─────────────────────────────────────────────────
 
   async listTicketForms(): Promise<unknown> {
@@ -133,17 +173,19 @@ export class NinjaClient {
   }
 
   async createTicket(input: CreateTicketInput): Promise<NinjaTicket> {
-    const clientId = await this.resolveClientId(input);
-    const requesterUid = input.requester_email
-      ? (await this.findContactByEmail(input.requester_email))?.uid
-      : undefined;
+    const [clientId, requesterUid, technician] = await Promise.all([
+      this.resolveClientId(input),
+      input.requester_email ? this.findContactByEmail(input.requester_email).then((c) => c?.uid) : Promise.resolve(undefined),
+      this.getTechnicianProfile()
+    ]);
 
-    const payload = buildCreatePayload(input, clientId, requesterUid, this.config);
+    const payload = buildCreatePayload(input, clientId, requesterUid, technician, this.config);
     return this.request<NinjaTicket>("/ticketing/ticket", "POST", payload);
   }
 
   async updateTicket(input: UpdateTicketInput): Promise<NinjaTicket> {
     const { ticket_id, comment_body, comment_public, ...ticketFields } = input;
+    const technician = await this.getTechnicianProfile();
 
     const ticketPart: Record<string, unknown> = {};
     if (ticketFields.summary !== undefined) ticketPart.summary = ticketFields.summary;
@@ -151,10 +193,12 @@ export class NinjaClient {
     if (ticketFields.type !== undefined) ticketPart.type = ticketFields.type;
     if (ticketFields.priority !== undefined) ticketPart.priority = ticketFields.priority;
     if (ticketFields.severity !== undefined) ticketPart.severity = ticketFields.severity;
-    if (ticketFields.assigned_app_user_id !== undefined) ticketPart.assignedAppUserId = ticketFields.assigned_app_user_id;
+    // Explicit override takes precedence; fall back to technician profile
+    const assignee = ticketFields.assigned_app_user_id ?? technician?.appUserId;
+    if (assignee !== undefined) ticketPart.assignedAppUserId = assignee;
 
     const commentPart: Record<string, unknown> | undefined = comment_body
-      ? { body: comment_body, public: comment_public ?? true }
+      ? { body: signComment(comment_body, technician), public: comment_public ?? true }
       : undefined;
 
     const payload: Record<string, unknown> = {};
@@ -165,9 +209,10 @@ export class NinjaClient {
   }
 
   async addComment(ticketId: number, comment: TicketComment): Promise<NinjaTicket> {
+    const technician = await this.getTechnicianProfile();
     return this.request<NinjaTicket>(`/ticketing/ticket/${ticketId}`, "PUT", {
       comment: {
-        body: comment.body,
+        body: signComment(comment.body, technician),
         ...(comment.htmlBody ? { htmlBody: comment.htmlBody } : {}),
         public: comment.public ?? true,
         ...(comment.timeTracked ? { timeTracked: comment.timeTracked } : {})
@@ -264,6 +309,7 @@ function buildCreatePayload(
   input: CreateTicketInput,
   clientId: number,
   requesterUid: string | undefined,
+  technician: TechnicianProfile | null,
   config: AppConfig
 ): Record<string, unknown> {
   const ticketFormId = input.form_id ?? config.defaultTicketFormId;
@@ -283,6 +329,7 @@ function buildCreatePayload(
   if (input.status) payload.status = input.status;
   if (requesterUid) payload.requesterUid = requesterUid;
   if (input.tags?.length) payload.tags = input.tags;
+  if (technician) payload.assignedAppUserId = technician.appUserId;
 
   return payload;
 }
@@ -301,6 +348,10 @@ function isContact(value: unknown): value is NinjaContact {
   return isRecord(value) && typeof value.id === "number" && typeof value.uid === "string" && typeof value.clientId === "number";
 }
 
+function isUser(value: unknown): value is NinjaUser {
+  return isRecord(value) && typeof value.id === "number";
+}
+
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
 function scoreOrgMatch(name: string, query: string): number {
@@ -308,6 +359,11 @@ function scoreOrgMatch(name: string, query: string): number {
   if (lower === query) return 0;
   if (lower.startsWith(query)) return 1;
   return 2;
+}
+
+function signComment(body: string, technician: TechnicianProfile | null): string {
+  if (!technician) return body;
+  return `${body}\n\n— ${technician.displayName}`;
 }
 
 async function safeText(response: Response): Promise<string> {

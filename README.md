@@ -40,8 +40,17 @@ In your Railway project, go to **Variables** and add:
 | `MCP_SHARED_SECRET` | a long random string — generate one with `openssl rand -hex 32` |
 | `DEFAULT_TICKET_FORM_ID` | leave blank for now (see Step 5) |
 | `DEFAULT_BOARD_ID` | leave blank for now (see Step 5) |
+| `TECHNICIAN_EMAIL` | your NinjaOne login email (see below) |
 
 > `PORT` is injected automatically by Railway. Do not set it manually.
+
+#### About `TECHNICIAN_EMAIL`
+
+Set this to the email address you use to log into NinjaOne. When configured:
+- **Tickets you create are auto-assigned to you** — no need to specify an assignee
+- **Comments are signed with your name** — since the NinjaOne API attributes everything to the API application rather than a human, this appends `— Your Name` so comments are traceable
+
+This is per-deployment: if multiple people on your team each deploy their own Railway instance, each sets their own email. Use `ninja_whoami` to confirm it's wired up correctly.
 
 After saving variables Railway will redeploy. Once it's green, confirm it's working:
 
@@ -102,6 +111,7 @@ Railway will redeploy automatically.
 | `ninja_list_ticket_forms` | List available ticket forms |
 | `ninja_list_ticket_boards` | List available boards |
 | `ninja_list_ticket_statuses` | List configured statuses |
+| `ninja_whoami` | Show which technician this server is configured as |
 
 ---
 
