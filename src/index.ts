@@ -235,6 +235,43 @@ Set public to false for an internal technician note.`,
   }
 );
 
+server.registerTool(
+  "ninja_get_ticket_log",
+  {
+    title: "Get NinjaOne Ticket Log",
+    description: "Return the full activity and comment log for a NinjaOne ticket. Includes technician notes, status changes, and client replies. Read-only.",
+    inputSchema: z.object({
+      ticket_id: z.number().int().positive().describe("NinjaOne ticket ID")
+    }).strict(),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+  },
+  async ({ ticket_id }) => jsonResult(await ninja.listTicketLogEntries(ticket_id))
+);
+
+server.registerTool(
+  "ninja_list_ticket_attributes",
+  {
+    title: "List NinjaOne Ticket Attributes",
+    description: "Return the available ticket attribute definitions for this NinjaOne tenant (e.g. custom fields, drop-down options). Read-only.",
+    inputSchema: z.object({}).strict(),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+  },
+  async () => jsonResult(await ninja.listTicketAttributes())
+);
+
+server.registerTool(
+  "ninja_list_tickets_for_board",
+  {
+    title: "List Tickets for NinjaOne Board",
+    description: "Return tickets currently on a specific NinjaOne board. Use ninja_list_ticket_boards to find board IDs. Read-only.",
+    inputSchema: z.object({
+      board_id: z.number().int().positive().describe("NinjaOne board ID (use ninja_list_ticket_boards to find)")
+    }).strict(),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+  },
+  async ({ board_id }) => jsonResult(await ninja.listTicketsForBoard(board_id))
+);
+
 // ── Express app ───────────────────────────────────────────────────────────────
 
 const app = express();

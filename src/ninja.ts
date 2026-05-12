@@ -159,11 +159,11 @@ export class NinjaClient {
   }
 
   async listTicketBoards(): Promise<unknown> {
-    return this.request<unknown>("/ticketing/boards", "GET");
+    return this.request<unknown>("/ticketing/trigger/boards", "GET");
   }
 
   async listTicketStatuses(): Promise<unknown> {
-    return this.request<unknown>("/ticketing/status", "GET");
+    return this.request<unknown>("/ticketing/statuses", "GET");
   }
 
   // ── Tickets ───────────────────────────────────────────────────────────────
@@ -208,16 +208,26 @@ export class NinjaClient {
     return this.request<NinjaTicket>(`/ticketing/ticket/${ticket_id}`, "PUT", payload);
   }
 
-  async addComment(ticketId: number, comment: TicketComment): Promise<NinjaTicket> {
+  async addComment(ticketId: number, comment: TicketComment): Promise<unknown> {
     const technician = await this.getTechnicianProfile();
-    return this.request<NinjaTicket>(`/ticketing/ticket/${ticketId}`, "PUT", {
-      comment: {
-        body: signComment(comment.body, technician),
-        ...(comment.htmlBody ? { htmlBody: comment.htmlBody } : {}),
-        public: comment.public ?? true,
-        ...(comment.timeTracked ? { timeTracked: comment.timeTracked } : {})
-      }
+    return this.request<unknown>(`/ticketing/ticket/${ticketId}/comment`, "POST", {
+      body: signComment(comment.body, technician),
+      ...(comment.htmlBody ? { htmlBody: comment.htmlBody } : {}),
+      public: comment.public ?? true,
+      ...(comment.timeTracked ? { timeTracked: comment.timeTracked } : {})
     });
+  }
+
+  async listTicketLogEntries(ticketId: number): Promise<unknown> {
+    return this.request<unknown>(`/ticketing/ticket/${ticketId}/log-entry`, "GET");
+  }
+
+  async listTicketAttributes(): Promise<unknown> {
+    return this.request<unknown>("/ticketing/attributes", "GET");
+  }
+
+  async listTicketsForBoard(boardId: number): Promise<unknown> {
+    return this.request<unknown>(`/ticketing/trigger/board/${boardId}/run`, "POST");
   }
 
   // ── Private helpers ───────────────────────────────────────────────────────
