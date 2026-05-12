@@ -68,9 +68,27 @@ After saving variables Railway will redeploy. Once it's green, confirm it's work
 GET https://your-service.up.railway.app/health
 ```
 
-### Step 4 — Connect to Claude Desktop
+### Step 4 — Connect Claude
 
-Open your Claude Desktop config file:
+Pick whichever method matches how you use Claude.
+
+---
+
+#### Option A — Claude.ai (browser, no install required)
+
+1. Go to [claude.ai](https://claude.ai) and open **Settings → Integrations**
+2. Click **Add custom integration**
+3. Fill in the form:
+   - **Name:** NinjaOne Tickets
+   - **URL:** `https://your-service.up.railway.app/mcp`
+   - **Authorization header:** `Bearer your_MCP_SHARED_SECRET`
+4. Click **Save** — the NinjaOne tools will be available in any new conversation
+
+---
+
+#### Option B — Claude Desktop (Mac/Windows app)
+
+Open your config file:
 - **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
 - **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
 
@@ -91,6 +109,8 @@ Add this entry under `mcpServers`:
 ```
 
 Restart Claude Desktop. You should see the NinjaOne tools appear in the tools list.
+
+---
 
 ### Step 5 — (Optional) Set default form and board IDs
 
