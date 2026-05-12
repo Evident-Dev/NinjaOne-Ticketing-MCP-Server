@@ -33,8 +33,8 @@ In your Railway project, go to **Variables** and add:
 
 | Variable | Value |
 |---|---|
-| `NINJA_TOKEN_URL` | `https://your-instance.rmmservices.net/oauth/token` |
-| `NINJA_API_BASE_URL` | `https://your-instance.rmmservices.net/api/v2` |
+| `NINJA_TOKEN_URL` | `https://<YOUR_INSTANCE>.rmmservices.net/oauth/token` |
+| `NINJA_API_BASE_URL` | `https://<YOUR_INSTANCE>.rmmservices.net/api/v2` |
 | `NINJA_CLIENT_ID` | from Step 1 |
 | `NINJA_CLIENT_SECRET` | from Step 1 |
 | `MCP_SHARED_SECRET` | a long random string — see below for how to generate one |
@@ -65,7 +65,7 @@ This is per-deployment: if multiple people on your team each deploy their own Ra
 After saving variables Railway will redeploy. Once it's green, confirm it's working:
 
 ```
-GET https://your-service.up.railway.app/health
+GET https://<YOUR_RAILWAY_URL>/health
 ```
 
 ### Step 4 — Connect Claude
@@ -80,8 +80,8 @@ Pick whichever method matches how you use Claude.
 2. Click **Add custom integration**
 3. Fill in the form:
    - **Name:** NinjaOne Tickets
-   - **URL:** `https://your-service.up.railway.app/mcp`
-   - **Authorization header:** `Bearer your_MCP_SHARED_SECRET`
+   - **URL:** `https://<YOUR_RAILWAY_URL>/mcp`
+   - **Authorization header:** `Bearer <YOUR_MCP_SHARED_SECRET>`
 4. Click **Save** — the NinjaOne tools will be available in any new conversation
 
 ---
@@ -99,9 +99,9 @@ Add this entry under `mcpServers`:
   "mcpServers": {
     "ninjaone": {
       "type": "http",
-      "url": "https://your-service.up.railway.app/mcp",
+      "url": "https://<YOUR_RAILWAY_URL>/mcp",
       "headers": {
-        "Authorization": "Bearer your_MCP_SHARED_SECRET"
+        "Authorization": "Bearer <YOUR_MCP_SHARED_SECRET>"
       }
     }
   }
@@ -109,6 +109,22 @@ Add this entry under `mcpServers`:
 ```
 
 Restart Claude Desktop. You should see the NinjaOne tools appear in the tools list.
+
+---
+
+#### Option C — Claude Code (CLI)
+
+For the terminal crowd. Run this once to register the server globally:
+
+```bash
+claude mcp add ninjaone --transport http https://<YOUR_RAILWAY_URL>/mcp --header "Authorization: Bearer <YOUR_MCP_SHARED_SECRET>"
+```
+
+The tools will be available in every Claude Code session from that point on. To verify:
+
+```bash
+claude mcp list
+```
 
 ---
 
@@ -161,7 +177,7 @@ curl http://localhost:3000/health
 
 Test the NinjaOne connection:
 ```bash
-curl -H "Authorization: Bearer your_MCP_SHARED_SECRET" \
+curl -H "Authorization: Bearer <YOUR_MCP_SHARED_SECRET>" \
      http://localhost:3000/debug/test-ninja
 ```
 
