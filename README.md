@@ -29,18 +29,29 @@ An MCP server that lets Claude create and manage NinjaOne support tickets using 
 
 ### Step 3 - Set environment variables in Railway
 
-In your Railway project, go to **Variables** and add:
+In your Railway project, go to **Variables -> Raw Editor**. Paste the block below as-is, then fill in your values and click **Update Variables**:
 
-| Variable | Value |
+```env
+NINJA_TOKEN_URL=https://<YOUR_INSTANCE>.rmmservices.net/oauth/token
+NINJA_API_BASE_URL=https://<YOUR_INSTANCE>.rmmservices.net/api/v2
+NINJA_CLIENT_ID=
+NINJA_CLIENT_SECRET=
+MCP_SHARED_SECRET=
+TECHNICIAN_EMAIL=
+DEFAULT_TICKET_FORM_ID=
+DEFAULT_BOARD_ID=
+```
+
+| Variable | What to put |
 |---|---|
-| `NINJA_TOKEN_URL` | `https://<YOUR_INSTANCE>.rmmservices.net/oauth/token` |
-| `NINJA_API_BASE_URL` | `https://<YOUR_INSTANCE>.rmmservices.net/api/v2` |
-| `NINJA_CLIENT_ID` | from Step 1 |
-| `NINJA_CLIENT_SECRET` | from Step 1 |
-| `MCP_SHARED_SECRET` | a long random string - see below for how to generate one |
-| `DEFAULT_TICKET_FORM_ID` | leave blank for now (see Step 5) |
-| `DEFAULT_BOARD_ID` | leave blank for now (see Step 5) |
-| `TECHNICIAN_EMAIL` | your NinjaOne login email (see below) |
+| `NINJA_TOKEN_URL` | Replace `<YOUR_INSTANCE>` with your NinjaOne subdomain |
+| `NINJA_API_BASE_URL` | Replace `<YOUR_INSTANCE>` with your NinjaOne subdomain |
+| `NINJA_CLIENT_ID` | From Step 1 |
+| `NINJA_CLIENT_SECRET` | From Step 1 |
+| `MCP_SHARED_SECRET` | Generated secret - see below |
+| `TECHNICIAN_EMAIL` | Your NinjaOne login email - see below |
+| `DEFAULT_TICKET_FORM_ID` | Leave blank for now (see Step 5) |
+| `DEFAULT_BOARD_ID` | Leave blank for now (see Step 5) |
 
 #### Generating your `MCP_SHARED_SECRET`
 
