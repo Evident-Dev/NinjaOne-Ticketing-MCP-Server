@@ -311,9 +311,9 @@ function requireSharedSecret(req: Request, res: Response, next: NextFunction): v
     next();
     return;
   }
-  const expected = `Bearer ${config.mcpSharedSecret}`;
-  const actual = req.header("authorization") || "";
-  if (actual !== expected) {
+  const headerToken = req.header("authorization")?.replace(/^Bearer\s+/i, "");
+  const queryToken = typeof req.query.token === "string" ? req.query.token : undefined;
+  if (headerToken !== config.mcpSharedSecret && queryToken !== config.mcpSharedSecret) {
     res.status(401).json({ ok: false, error: "Unauthorized" });
     return;
   }

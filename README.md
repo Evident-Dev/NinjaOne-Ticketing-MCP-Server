@@ -91,9 +91,10 @@ Pick whichever method matches how you use Claude.
 2. Click **Add custom integration**
 3. Fill in the form:
    - **Name:** NinjaOne Tickets
-   - **URL:** `https://<YOUR_RAILWAY_URL>/mcp`
-   - **Authorization header:** `Bearer <YOUR_MCP_SHARED_SECRET>`
-4. Click **Save** - the NinjaOne tools will be available in any new conversation
+   - **Remote MCP server URL:** `https://<YOUR_RAILWAY_URL>/mcp?token=<YOUR_MCP_SHARED_SECRET>`
+4. Click **Add** - the NinjaOne tools will be available in any new conversation
+
+> The token is passed as a URL parameter since the Claude.ai connector does not support custom headers. Leave Advanced settings alone - that is for OAuth which this server does not use.
 
 ---
 
