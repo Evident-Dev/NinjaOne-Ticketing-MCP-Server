@@ -259,7 +259,8 @@ export class NinjaClient {
     const body = new URLSearchParams({
       grant_type: "client_credentials",
       client_id: this.config.ninjaClientId,
-      client_secret: this.config.ninjaClientSecret
+      client_secret: this.config.ninjaClientSecret,
+      scope: "monitoring management"
     });
 
     const response = await fetch(this.config.ninjaTokenUrl, {
