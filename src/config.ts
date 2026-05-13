@@ -35,8 +35,11 @@ function optionalNumber(name: string): number | undefined {
 }
 
 function deriveAuthorizeUrl(tokenUrl: string): string {
-  // Token endpoint is typically /ws/oauth/token; authorize is /ws/oauth/authorize
-  return tokenUrl.replace(/\/token\/?$/, "/authorize");
+  // NinjaOne's canonical OAuth paths live under /ws/oauth/. The token endpoint
+  // is forgiving (both /oauth/token and /ws/oauth/token work), but /authorize
+  // must be /ws/oauth/authorize. Normalize regardless of which form the user
+  // configured for NINJA_TOKEN_URL.
+  return tokenUrl.replace(/\/(?:ws\/)?oauth\/token\/?$/, "/ws/oauth/authorize");
 }
 
 export function loadConfig(): AppConfig {
