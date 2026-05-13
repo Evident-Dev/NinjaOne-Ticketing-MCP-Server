@@ -88,8 +88,9 @@ export interface CreateTicketInput {
   type?: TicketType;
   priority?: TicketPriority;
   severity?: TicketSeverity;
-  status?: TicketStatus;
+  status?: string;
   requester_email?: string;
+  assigned_app_user_id?: number;
   form_id?: number;
   tags?: string[];
 }

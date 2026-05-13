@@ -1,9 +1,14 @@
 export interface AppConfig {
   port: number;
   ninjaTokenUrl: string;
+  ninjaAuthorizeUrl: string;
   ninjaApiBaseUrl: string;
   ninjaClientId: string;
   ninjaClientSecret: string;
+  oauthRedirectUri: string;
+  oauthScope: string;
+  tokenStorePath: string;
+  publicBaseUrl?: string;
   mcpSharedSecret?: string;
   defaultTicketFormId?: number;
   defaultBoardId?: number;
@@ -28,13 +33,27 @@ function optionalNumber(name: string): number | undefined {
   return parsed;
 }
 
+function deriveAuthorizeUrl(tokenUrl: string): string {
+  // Token endpoint is typically /ws/oauth/token; authorize is /ws/oauth/authorize
+  return tokenUrl.replace(/\/token\/?$/, "/authorize");
+}
+
 export function loadConfig(): AppConfig {
+  const tokenUrl = optional("NINJA_TOKEN_URL");
+  const publicBase = optional("PUBLIC_BASE_URL").replace(/\/$/, "");
+  const explicitRedirect = optional("OAUTH_REDIRECT_URI");
+
   return {
     port: Number(process.env.PORT || 3000),
-    ninjaTokenUrl: optional("NINJA_TOKEN_URL"),
+    ninjaTokenUrl: tokenUrl,
+    ninjaAuthorizeUrl: optional("NINJA_AUTHORIZE_URL") || deriveAuthorizeUrl(tokenUrl),
     ninjaApiBaseUrl: optional("NINJA_API_BASE_URL").replace(/\/$/, ""),
     ninjaClientId: optional("NINJA_CLIENT_ID"),
     ninjaClientSecret: optional("NINJA_CLIENT_SECRET"),
+    oauthRedirectUri: explicitRedirect || (publicBase ? `${publicBase}/auth/callback` : ""),
+    oauthScope: optional("OAUTH_SCOPE") || "monitoring management offline_access",
+    tokenStorePath: optional("TOKEN_STORE_PATH") || "/data/ninja-token.json",
+    publicBaseUrl: publicBase || undefined,
     mcpSharedSecret: process.env.MCP_SHARED_SECRET?.trim() || undefined,
     defaultTicketFormId: optionalNumber("DEFAULT_TICKET_FORM_ID"),
     defaultBoardId: optionalNumber("DEFAULT_BOARD_ID"),

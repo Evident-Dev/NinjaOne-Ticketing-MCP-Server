@@ -4,9 +4,18 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import { getMissingVars, loadConfig } from "./config.js";
 import { NinjaClient } from "./ninja.js";
+import {
+  buildAuthorizeUrl,
+  exchangeCodeForTokens,
+  loginUrl,
+  StateCache,
+  TokenStore
+} from "./auth.js";
 
 const config = loadConfig();
-const ninja = new NinjaClient(config);
+const tokenStore = new TokenStore(config.tokenStorePath);
+const stateCache = new StateCache();
+const ninja = new NinjaClient(config, tokenStore);
 
 const server = new McpServer({
   name: "ninja-ticket-mcp-server",
@@ -97,6 +106,26 @@ server.registerTool(
 );
 
 server.registerTool(
+  "ninja_auth_status",
+  {
+    title: "NinjaOne User Auth Status",
+    description: "Check whether the MCP server has a user-context NinjaOne token (required for creating/updating tickets and adding comments). If not authenticated, returns a login_url to share with the user so they can connect their NinjaOne account.",
+    inputSchema: z.object({}).strict(),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  },
+  async () => {
+    const authed = await ninja.hasUserAuth();
+    return jsonResult({
+      authenticated: authed,
+      login_url: loginUrl(config),
+      message: authed
+        ? "User-scoped NinjaOne token is active. Write operations should work."
+        : "No user-scoped NinjaOne token on file. Reads work; writes will fail. Visit login_url in a browser to connect."
+    });
+  }
+);
+
+server.registerTool(
   "ninja_whoami",
   {
     title: "NinjaOne Technician Identity",
@@ -130,7 +159,7 @@ server.registerTool(
     title: "Get NinjaOne Ticket",
     description: "Retrieve a NinjaOne ticket by its numeric ID. Returns the full ticket object including status, priority, assignee, and description.",
     inputSchema: z.object({
-      ticket_id: z.number().int().positive().describe("NinjaOne ticket ID")
+      ticket_id: z.coerce.number().int().positive().describe("NinjaOne ticket ID")
     }).strict(),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
   },
@@ -155,16 +184,17 @@ If you have an email address for the requester, pass it as requester_email and t
 This tool only creates the ticket. It does not run scripts, access devices, or change configurations.`,
     inputSchema: z.object({
       organization_name: z.string().min(2).optional().describe("NinjaOne organization/client name (fuzzy matched)"),
-      organization_id: z.number().int().positive().optional().describe("Exact NinjaOne organization ID"),
+      organization_id: z.coerce.number().int().positive().optional().describe("Exact NinjaOne organization ID"),
       organization_domain: z.string().min(3).optional().describe("Email domain of the client, e.g. acme.com"),
       summary: z.string().min(3).max(200).describe("Ticket subject / one-line summary"),
       description: z.string().min(3).max(10000).describe("Full ticket details"),
       type: z.enum(["PROBLEM", "QUESTION", "INCIDENT", "TASK"]).optional().describe("Ticket type: PROBLEM (something is broken), QUESTION (information needed), INCIDENT (ongoing outage/impact), TASK (planned work)"),
       priority: z.enum(["NONE", "LOW", "MEDIUM", "HIGH"]).optional().describe("Ticket priority"),
       severity: z.enum(["NONE", "MINOR", "MODERATE", "MAJOR", "CRITICAL"]).optional().describe("Impact severity"),
-      status: z.enum(["NEW", "OPEN", "WAITING", "PAUSED", "RESOLVED", "CLOSED"]).optional().describe("Initial status (defaults to NEW)"),
+      status: z.string().optional().describe("Initial status — accepts symbolic name (NEW, OPEN, WAITING, PAUSED, RESOLVED, CLOSED) or numeric statusId. Defaults to NEW."),
       requester_email: z.string().email().optional().describe("Email of the person requesting support — looked up in NinjaOne contacts to set requester"),
-      form_id: z.number().int().positive().optional().describe("Ticket form ID (use ninja_list_ticket_forms to find)"),
+      assigned_app_user_id: z.coerce.number().int().positive().optional().describe("Technician user ID to assign the ticket to (overrides default technician)"),
+      form_id: z.coerce.number().int().positive().optional().describe("Ticket form ID (use ninja_list_ticket_forms to find)"),
       tags: z.array(z.string()).optional().describe("Optional tags")
     }).strict().refine(
       (v) => v.organization_id || v.organization_name || v.organization_domain,
@@ -190,13 +220,13 @@ To put on hold waiting for the client: set status to "WAITING".
 
 Only supply the fields you want to change — unset fields are left as-is.`,
     inputSchema: z.object({
-      ticket_id: z.number().int().positive().describe("NinjaOne ticket ID to update"),
+      ticket_id: z.coerce.number().int().positive().describe("NinjaOne ticket ID to update"),
       summary: z.string().min(3).max(200).optional().describe("New ticket summary/subject"),
       status: z.enum(["NEW", "OPEN", "WAITING", "PAUSED", "RESOLVED", "CLOSED"]).optional().describe("New ticket status"),
       type: z.enum(["PROBLEM", "QUESTION", "INCIDENT", "TASK"]).optional().describe("New ticket type"),
       priority: z.enum(["NONE", "LOW", "MEDIUM", "HIGH"]).optional().describe("New priority"),
       severity: z.enum(["NONE", "MINOR", "MODERATE", "MAJOR", "CRITICAL"]).optional().describe("New severity"),
-      assigned_app_user_id: z.number().int().positive().optional().describe("User ID to assign the ticket to"),
+      assigned_app_user_id: z.coerce.number().int().positive().optional().describe("User ID to assign the ticket to"),
       comment_body: z.string().min(1).optional().describe("Comment or note to add to the ticket at the same time"),
       comment_public: z.boolean().optional().default(true).describe("Whether the comment is visible to the client (true) or internal only (false)")
     }).strict(),
@@ -217,7 +247,7 @@ server.registerTool(
 Set public to true (default) for a client-visible reply.
 Set public to false for an internal technician note.`,
     inputSchema: z.object({
-      ticket_id: z.number().int().positive().describe("NinjaOne ticket ID"),
+      ticket_id: z.coerce.number().int().positive().describe("NinjaOne ticket ID"),
       body: z.string().min(1).describe("Comment text"),
       public: z.boolean().optional().default(true).describe("True = visible to client, false = internal note"),
       time_tracked: z.number().int().min(0).optional().describe("Time spent in seconds (optional, for time tracking)")
@@ -240,7 +270,7 @@ server.registerTool(
     title: "Get NinjaOne Ticket Log",
     description: "Return the full activity and comment log for a NinjaOne ticket. Includes technician notes, status changes, and client replies. Read-only.",
     inputSchema: z.object({
-      ticket_id: z.number().int().positive().describe("NinjaOne ticket ID")
+      ticket_id: z.coerce.number().int().positive().describe("NinjaOne ticket ID")
     }).strict(),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
   },
@@ -264,7 +294,7 @@ server.registerTool(
     title: "List Tickets for NinjaOne Board",
     description: "Return tickets currently on a specific NinjaOne board. Use ninja_list_ticket_boards to find board IDs. Read-only.",
     inputSchema: z.object({
-      board_id: z.number().int().positive().describe("NinjaOne board ID (use ninja_list_ticket_boards to find)")
+      board_id: z.coerce.number().int().positive().describe("NinjaOne board ID (use ninja_list_ticket_boards to find)")
     }).strict(),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
   },
@@ -285,6 +315,67 @@ app.get("/health", (_req: Request, res: Response) => {
   res.json({ ok: true, configured: true, service: "ninja-ticket-mcp-server", version: "0.2.0" });
 });
 
+
+app.get("/auth/login", requireSharedSecret, requireConfigured, (_req: Request, res: Response) => {
+  if (!config.oauthRedirectUri) {
+    res.status(500).send("OAuth redirect URI is not configured. Set PUBLIC_BASE_URL or OAUTH_REDIRECT_URI.");
+    return;
+  }
+  const state = stateCache.create();
+  res.redirect(buildAuthorizeUrl(config, state));
+});
+
+app.get("/auth/callback", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { code, state, error, error_description } = req.query as Record<string, string | undefined>;
+    if (error) {
+      res.status(400).send(`NinjaOne returned an error: ${error} — ${error_description ?? ""}`);
+      return;
+    }
+    if (!code || !state) {
+      res.status(400).send("Missing code or state parameter.");
+      return;
+    }
+    if (!stateCache.consume(state)) {
+      res.status(400).send("Invalid or expired state parameter. Restart the login flow.");
+      return;
+    }
+
+    const tokens = await exchangeCodeForTokens(config, code);
+    if (!tokens.refresh_token) {
+      res.status(500).send("NinjaOne did not return a refresh_token. Ensure the OAuth app has the 'offline_access' scope enabled.");
+      return;
+    }
+
+    const now = Date.now();
+    const expiresInSeconds = tokens.expires_in ?? 3600;
+    await tokenStore.save({
+      refresh_token: tokens.refresh_token,
+      access_token: tokens.access_token,
+      access_token_expires_at: now + expiresInSeconds * 1000,
+      scope: tokens.scope,
+      obtained_at: now
+    });
+
+    res.set("Content-Type", "text/html").send(`<!doctype html>
+<html><body style="font-family:system-ui;max-width:540px;margin:4rem auto;padding:1rem;">
+  <h2>Connected to NinjaOne</h2>
+  <p>The MCP server now has a user-scoped token. You can close this window and retry your action in Claude.</p>
+  <p><small>Scope: ${tokens.scope ?? config.oauthScope}</small></p>
+</body></html>`);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/auth/status", requireSharedSecret, async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const authed = await ninja.hasUserAuth();
+    res.json({ authenticated: authed, login_url: loginUrl(config) });
+  } catch (error) {
+    next(error);
+  }
+});
 
 app.get("/debug/test-ninja", requireSharedSecret, requireConfigured, async (_req: Request, res: Response, next: NextFunction) => {
   try {

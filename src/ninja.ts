@@ -1,4 +1,5 @@
 import type { AppConfig } from "./config.js";
+import { loginUrl, refreshAccessToken, TokenStore } from "./auth.js";
 import type {
   CreateTicketInput,
   NinjaContact,
@@ -15,6 +16,7 @@ import type {
 interface CachedToken {
   accessToken: string;
   expiresAtMs: number;
+  userContext: boolean;
 }
 
 interface CachedList<T> {
@@ -45,7 +47,14 @@ export class NinjaClient {
   private statusCache?: CachedList<TicketStatusRecord>;
   private technicianProfile?: TechnicianProfile | null;
 
-  constructor(private readonly config: AppConfig) {}
+  constructor(private readonly config: AppConfig, private readonly tokenStore: TokenStore) {}
+
+  // Indicates whether a user-context refresh token is on disk. Reads can
+  // succeed without it via client_credentials, but writes need it.
+  async hasUserAuth(): Promise<boolean> {
+    const stored = await this.tokenStore.load();
+    return !!stored?.refresh_token;
+  }
 
   async testConnection(): Promise<{ ok: boolean; orgCount: number }> {
     const orgs = await this.getOrganizations();
@@ -300,39 +309,69 @@ export class NinjaClient {
     throw new Error("Provide organization_id, organization_name, or organization_domain.");
   }
 
-  private async getAccessToken(): Promise<string> {
+  private async getAccessToken(requireUserContext = false): Promise<string> {
     const now = Date.now();
     if (this.token && this.token.expiresAtMs > now + 60_000) {
-      return this.token.accessToken;
+      if (!requireUserContext || this.token.userContext) return this.token.accessToken;
     }
 
+    const stored = await this.tokenStore.load();
+    if (stored?.refresh_token) {
+      try {
+        const refreshed = await refreshAccessToken(this.config, stored.refresh_token);
+        const expiresInSeconds = refreshed.expires_in ?? 3600;
+        await this.tokenStore.save({
+          refresh_token: refreshed.refresh_token ?? stored.refresh_token,
+          access_token: refreshed.access_token,
+          access_token_expires_at: now + expiresInSeconds * 1000,
+          scope: refreshed.scope ?? stored.scope,
+          obtained_at: now
+        });
+        this.token = {
+          accessToken: refreshed.access_token,
+          expiresAtMs: now + expiresInSeconds * 1000,
+          userContext: true
+        };
+        return this.token.accessToken;
+      } catch (error) {
+        console.warn("NinjaOne refresh token exchange failed, falling back:", error);
+        this.tokenStore.invalidate();
+      }
+    }
+
+    if (requireUserContext) {
+      throw new Error(authRequiredMessage(this.config));
+    }
+
+    // Fallback: client_credentials (machine token, reads-only).
     const body = new URLSearchParams({
       grant_type: "client_credentials",
       client_id: this.config.ninjaClientId,
       client_secret: this.config.ninjaClientSecret,
       scope: "monitoring management"
     });
-
     const response = await fetch(this.config.ninjaTokenUrl, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
       body
     });
-
     if (!response.ok) {
       throw new Error(`NinjaOne token request failed: ${response.status} ${await safeText(response)}`);
     }
-
     const tokenData = (await response.json()) as NinjaTokenResponse;
     if (!tokenData.access_token) throw new Error("NinjaOne token response did not include access_token.");
-
     const expiresInSeconds = tokenData.expires_in ?? 3600;
-    this.token = { accessToken: tokenData.access_token, expiresAtMs: now + expiresInSeconds * 1000 };
+    this.token = {
+      accessToken: tokenData.access_token,
+      expiresAtMs: now + expiresInSeconds * 1000,
+      userContext: false
+    };
     return this.token.accessToken;
   }
 
   async request<T>(path: string, method: "GET" | "POST" | "PUT", body?: unknown): Promise<T> {
-    const token = await this.getAccessToken();
+    const isWrite = method !== "GET";
+    const token = await this.getAccessToken(isWrite);
     const url = `${this.config.ninjaApiBaseUrl}${path}`;
 
     const response = await fetch(url, {
@@ -346,7 +385,11 @@ export class NinjaClient {
     });
 
     if (!response.ok) {
-      throw new Error(`NinjaOne API error: ${method} ${path} → ${response.status} ${await safeText(response)}`);
+      const text = await safeText(response);
+      if (response.status === 403 && /user_context_required/i.test(text)) {
+        throw new Error(authRequiredMessage(this.config));
+      }
+      throw new Error(`NinjaOne API error: ${method} ${path} → ${response.status} ${text}`);
     }
 
     if (response.status === 204) return undefined as T;
@@ -354,7 +397,7 @@ export class NinjaClient {
   }
 
   private async requestMultipart(path: string, form: FormData): Promise<void> {
-    const token = await this.getAccessToken();
+    const token = await this.getAccessToken(true);
     const url = `${this.config.ninjaApiBaseUrl}${path}`;
 
     const response = await fetch(url, {
@@ -364,9 +407,17 @@ export class NinjaClient {
     });
 
     if (!response.ok) {
-      throw new Error(`NinjaOne API error: POST ${path} → ${response.status} ${await safeText(response)}`);
+      const text = await safeText(response);
+      if (response.status === 403 && /user_context_required/i.test(text)) {
+        throw new Error(authRequiredMessage(this.config));
+      }
+      throw new Error(`NinjaOne API error: POST ${path} → ${response.status} ${text}`);
     }
   }
+}
+
+function authRequiredMessage(config: AppConfig): string {
+  return `NinjaOne user authentication required for this action. Visit ${loginUrl(config)} in a browser to connect your NinjaOne account, then retry.`;
 }
 
 // ── Payload builders ──────────────────────────────────────────────────────────
@@ -394,7 +445,8 @@ function buildCreatePayload(
   if (statusId) payload.status = statusId;
   if (requesterUid) payload.requesterUid = requesterUid;
   if (input.tags?.length) payload.tags = input.tags;
-  if (technician) payload.assignedAppUserId = technician.appUserId;
+  const assignee = input.assigned_app_user_id ?? technician?.appUserId;
+  if (assignee !== undefined) payload.assignedAppUserId = assignee;
 
   return payload;
 }
