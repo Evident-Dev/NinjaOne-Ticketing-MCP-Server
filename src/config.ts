@@ -40,7 +40,10 @@ function deriveAuthorizeUrl(tokenUrl: string): string {
 
 export function loadConfig(): AppConfig {
   const tokenUrl = optional("NINJA_TOKEN_URL");
-  const publicBase = optional("PUBLIC_BASE_URL").replace(/\/$/, "");
+  const railwayDomain = optional("RAILWAY_PUBLIC_DOMAIN");
+  const publicBase =
+    optional("PUBLIC_BASE_URL").replace(/\/$/, "") ||
+    (railwayDomain ? `https://${railwayDomain}` : "");
   const explicitRedirect = optional("OAUTH_REDIRECT_URI");
 
   return {
