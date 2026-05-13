@@ -142,6 +142,27 @@ export function loginUrl(config: AppConfig): string {
   return url;
 }
 
+export function decodeJwt(token: string): Record<string, unknown> | undefined {
+  const parts = token.split(".");
+  if (parts.length !== 3) return undefined;
+  try {
+    const payload = Buffer.from(parts[1], "base64url").toString("utf8");
+    return JSON.parse(payload) as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+}
+
+// Pull a likely email or username out of common JWT claims.
+export function emailFromJwt(claims: Record<string, unknown>): string | undefined {
+  const candidates = ["email", "preferred_username", "unique_name", "upn", "username"];
+  for (const key of candidates) {
+    const value = claims[key];
+    if (typeof value === "string" && value.includes("@")) return value;
+  }
+  return undefined;
+}
+
 function isNoEnt(error: unknown): boolean {
   return typeof error === "object" && error !== null && (error as { code?: string }).code === "ENOENT";
 }

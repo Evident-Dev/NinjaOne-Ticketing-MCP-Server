@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -11,15 +12,26 @@ import {
   StateCache,
   TokenStore
 } from "./auth.js";
+import { SessionStore, type Session } from "./sessions.js";
+import {
+  discoveryDoc,
+  handleAuthorize,
+  handleNinjaCallbackForMcp,
+  handleRegister,
+  handleToken,
+  protectedResourceDoc
+} from "./oauth-server.js";
 
 const config = loadConfig();
 const tokenStore = new TokenStore(config.tokenStorePath);
+const sessionStore = new SessionStore(config.sessionStorePath);
 const stateCache = new StateCache();
-const ninja = new NinjaClient(config, tokenStore);
+const sessionContext = new AsyncLocalStorage<Session | undefined>();
+const ninja = new NinjaClient(config, tokenStore, sessionStore, sessionContext);
 
 const server = new McpServer({
   name: "ninja-ticket-mcp-server",
-  version: "0.2.0"
+  version: "0.3.0"
 });
 
 // ── Read-only lookup tools ────────────────────────────────────────────────────
@@ -305,16 +317,53 @@ server.registerTool(
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
+app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 
 app.get("/health", (_req: Request, res: Response) => {
   const missing = getMissingVars();
   if (missing.length > 0) {
-    res.json({ ok: true, configured: false, missing, service: "ninja-ticket-mcp-server", version: "0.2.0" });
+    res.json({ ok: true, configured: false, missing, service: "ninja-ticket-mcp-server", version: "0.3.0" });
     return;
   }
-  res.json({ ok: true, configured: true, service: "ninja-ticket-mcp-server", version: "0.2.0" });
+  res.json({ ok: true, configured: true, service: "ninja-ticket-mcp-server", version: "0.3.0" });
 });
 
+
+// ── MCP OAuth 2.1 (per-user, autoamtic via Claude.ai) ─────────────────────────
+
+app.get("/.well-known/oauth-authorization-server", (_req: Request, res: Response) => {
+  res.json(discoveryDoc(config));
+});
+
+app.get("/.well-known/oauth-protected-resource", (_req: Request, res: Response) => {
+  res.json(protectedResourceDoc(config));
+});
+
+app.post("/oauth/register", requireConfigured, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    await handleRegister(req, res, sessionStore);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/oauth/authorize", requireConfigured, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    await handleAuthorize(req, res, config, sessionStore);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/oauth/token", requireConfigured, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    await handleToken(req, res, sessionStore);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ── Legacy single-user login flow (still supported as a fallback) ─────────────
 
 app.get("/auth/login", requireSharedSecret, requireConfigured, (_req: Request, res: Response) => {
   if (!config.oauthRedirectUri) {
@@ -325,8 +374,19 @@ app.get("/auth/login", requireSharedSecret, requireConfigured, (_req: Request, r
   res.redirect(buildAuthorizeUrl(config, state));
 });
 
+// Single callback for both flows. We try the MCP flow first (state matches a
+// pending MCP auth); if not, fall back to the legacy single-user flow.
 app.get("/auth/callback", async (req: Request, res: Response, next: NextFunction) => {
   try {
+    const handled = await handleNinjaCallbackForMcp(
+      req,
+      res,
+      config,
+      sessionStore,
+      (token) => ninja.identifyUserFromToken(token)
+    );
+    if (handled) return;
+
     const { code, state, error, error_description } = req.query as Record<string, string | undefined>;
     if (error) {
       res.status(400).send(`NinjaOne returned an error: ${error} — ${error_description ?? ""}`);
@@ -385,7 +445,35 @@ app.get("/debug/test-ninja", requireSharedSecret, requireConfigured, async (_req
   }
 });
 
-app.post("/mcp", requireSharedSecret, requireConfigured, async (req: Request, res: Response) => {
+app.post("/mcp", requireConfigured, async (req: Request, res: Response) => {
+  const bearer = req.header("authorization")?.replace(/^Bearer\s+/i, "");
+  const queryToken = typeof req.query.token === "string" ? req.query.token : undefined;
+  const presented = bearer ?? queryToken;
+
+  let session: Session | undefined;
+  let isSharedSecret = false;
+
+  if (presented) {
+    session = await sessionStore.getSessionByAccessToken(presented);
+    if (!session && config.mcpSharedSecret && presented === config.mcpSharedSecret) {
+      isSharedSecret = true;
+    }
+    if (!session && !isSharedSecret) {
+      // Treat unknown token as no auth, fall through to 401.
+    }
+  }
+
+  if (!session && !isSharedSecret) {
+    res
+      .status(401)
+      .set(
+        "WWW-Authenticate",
+        `Bearer realm="MCP", resource_metadata="${config.publicBaseUrl}/.well-known/oauth-protected-resource"`
+      )
+      .json({ error: "unauthorized", error_description: "Authenticate via OAuth. See WWW-Authenticate header." });
+    return;
+  }
+
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true
@@ -395,22 +483,24 @@ app.post("/mcp", requireSharedSecret, requireConfigured, async (req: Request, re
     void transport.close();
   });
 
-  try {
-    await server.connect(transport);
-    await transport.handleRequest(req, res, req.body);
-  } catch (error) {
-    console.error("MCP request failed:", error);
-    if (!res.headersSent) {
-      res.status(500).json({
-        jsonrpc: "2.0",
-        id: null,
-        error: {
-          code: -32603,
-          message: error instanceof Error ? error.message : "Internal server error"
-        }
-      });
+  await sessionContext.run(session, async () => {
+    try {
+      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
+    } catch (error) {
+      console.error("MCP request failed:", error);
+      if (!res.headersSent) {
+        res.status(500).json({
+          jsonrpc: "2.0",
+          id: null,
+          error: {
+            code: -32603,
+            message: error instanceof Error ? error.message : "Internal server error"
+          }
+        });
+      }
     }
-  }
+  });
 });
 
 app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
@@ -419,7 +509,7 @@ app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
 });
 
 app.listen(config.port, () => {
-  console.log(`Ninja ticket MCP server v0.2.0 listening on port ${config.port}`);
+  console.log(`Ninja ticket MCP server v0.3.0 listening on port ${config.port}`);
 });
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

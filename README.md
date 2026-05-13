@@ -67,7 +67,7 @@ DEFAULT_TICKET_FORM_ID=
 | `NINJA_CLIENT_SECRET` | From Step 1 |
 | `MCP_SHARED_SECRET` | Generated secret - see below |
 | `TECHNICIAN_EMAIL` | Your NinjaOne login email - see below |
-| `DEFAULT_TICKET_FORM_ID` | Leave blank for now (see Step 7) |
+| `DEFAULT_TICKET_FORM_ID` | Leave blank for now (see Step 6) |
 
 Advanced (optional):
 
@@ -105,27 +105,9 @@ After saving variables Railway will redeploy. Once it's green, confirm it's work
 GET https://<YOUR_RAILWAY_URL>/health
 ```
 
-### Step 5 - One-time NinjaOne user login
+### Step 5 - Connect Claude
 
-This step grants the server a user-scoped token so it can create tickets, update them, and add comments. You only do this once per Railway instance (and again only if the refresh token is ever revoked).
-
-Open this URL in any browser:
-
-```
-https://<YOUR_RAILWAY_URL>/auth/login?token=<YOUR_MCP_SHARED_SECRET>
-```
-
-You'll be redirected to NinjaOne, asked to approve the app, and bounced back to a "Connected to NinjaOne" page. The refresh token is now persisted on the Railway Volume.
-
-To confirm, ask Claude:
-
-> *"Check the NinjaOne auth status"*
-
-The `ninja_auth_status` tool will report `authenticated: true`. If it ever reports `false` later, it returns a `login_url` you can click to reconnect.
-
-### Step 6 - Connect Claude
-
-Pick whichever method matches how you use Claude.
+The MCP server speaks the **MCP OAuth 2.1** protocol, so Claude.ai opens a login popup the first time you use a tool — no shared secrets in URLs. Each technician who connects gets their own NinjaOne identity, and tickets/comments are attributed to whoever is logged in.
 
 ---
 
@@ -135,10 +117,10 @@ Pick whichever method matches how you use Claude.
 2. Click **Add custom integration**
 3. Fill in the form:
    - **Name:** NinjaOne Tickets
-   - **Remote MCP server URL:** `https://<YOUR_RAILWAY_URL>/mcp?token=<YOUR_MCP_SHARED_SECRET>`
-4. Click **Add** - the NinjaOne tools will be available in any new conversation
+   - **Remote MCP server URL:** `https://<YOUR_RAILWAY_URL>/mcp`
+4. Click **Add**. The first time you invoke a NinjaOne tool in a conversation, Claude.ai pops a browser tab to log into NinjaOne. Approve once and you're connected.
 
-> The token is passed as a URL parameter since the Claude.ai connector does not support custom headers. Leave Advanced settings alone - that is for OAuth which this server does not use for the MCP transport itself.
+> Each Claude.ai user who connects this MCP gets their own NinjaOne session via OAuth — tickets and comments will be signed with that user's name automatically.
 
 ---
 
@@ -155,16 +137,13 @@ Add this entry under `mcpServers`:
   "mcpServers": {
     "ninjaone": {
       "type": "http",
-      "url": "https://<YOUR_RAILWAY_URL>/mcp",
-      "headers": {
-        "Authorization": "Bearer <YOUR_MCP_SHARED_SECRET>"
-      }
+      "url": "https://<YOUR_RAILWAY_URL>/mcp"
     }
   }
 }
 ```
 
-Restart Claude Desktop. You should see the NinjaOne tools appear in the tools list.
+Restart Claude Desktop. The first NinjaOne tool call will trigger the OAuth login flow in your browser.
 
 ---
 
@@ -173,10 +152,10 @@ Restart Claude Desktop. You should see the NinjaOne tools appear in the tools li
 For the terminal crowd. Run this once to register the server globally:
 
 ```bash
-claude mcp add ninjaone --transport http https://<YOUR_RAILWAY_URL>/mcp --header "Authorization: Bearer <YOUR_MCP_SHARED_SECRET>"
+claude mcp add ninjaone --transport http https://<YOUR_RAILWAY_URL>/mcp
 ```
 
-The tools will be available in every Claude Code session from that point on. To verify:
+The tools will be available in every Claude Code session from that point on. Claude Code will prompt for OAuth login the first time. To verify:
 
 ```bash
 claude mcp list
@@ -184,7 +163,7 @@ claude mcp list
 
 ---
 
-### Step 7 - (Optional) Set default form ID
+### Step 6 - (Optional) Set default form ID
 
 If you always want tickets to use a specific form without having to specify it every time, ask Claude:
 

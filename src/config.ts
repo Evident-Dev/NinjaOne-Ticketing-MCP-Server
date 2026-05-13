@@ -8,6 +8,7 @@ export interface AppConfig {
   oauthRedirectUri: string;
   oauthScope: string;
   tokenStorePath: string;
+  sessionStorePath: string;
   publicBaseUrl?: string;
   mcpSharedSecret?: string;
   defaultTicketFormId?: number;
@@ -56,6 +57,7 @@ export function loadConfig(): AppConfig {
     oauthRedirectUri: explicitRedirect || (publicBase ? `${publicBase}/auth/callback` : ""),
     oauthScope: optional("OAUTH_SCOPE") || "monitoring management offline_access",
     tokenStorePath: optional("TOKEN_STORE_PATH") || "/data/ninja-token.json",
+    sessionStorePath: optional("SESSION_STORE_PATH") || "/data/sessions.json",
     publicBaseUrl: publicBase || undefined,
     mcpSharedSecret: process.env.MCP_SHARED_SECRET?.trim() || undefined,
     defaultTicketFormId: optionalNumber("DEFAULT_TICKET_FORM_ID"),

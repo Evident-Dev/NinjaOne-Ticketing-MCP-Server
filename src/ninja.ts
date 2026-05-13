@@ -1,5 +1,7 @@
+import type { AsyncLocalStorage } from "node:async_hooks";
 import type { AppConfig } from "./config.js";
 import { loginUrl, refreshAccessToken, TokenStore } from "./auth.js";
+import type { Session, SessionStore } from "./sessions.js";
 import type {
   CreateTicketInput,
   NinjaContact,
@@ -18,6 +20,8 @@ interface CachedToken {
   expiresAtMs: number;
   userContext: boolean;
 }
+
+export type SessionContext = AsyncLocalStorage<Session | undefined>;
 
 interface CachedList<T> {
   items: T[];
@@ -47,11 +51,17 @@ export class NinjaClient {
   private statusCache?: CachedList<TicketStatusRecord>;
   private technicianProfile?: TechnicianProfile | null;
 
-  constructor(private readonly config: AppConfig, private readonly tokenStore: TokenStore) {}
+  constructor(
+    private readonly config: AppConfig,
+    private readonly tokenStore: TokenStore,
+    private readonly sessionStore: SessionStore,
+    private readonly sessionContext: SessionContext
+  ) {}
 
-  // Indicates whether a user-context refresh token is on disk. Reads can
-  // succeed without it via client_credentials, but writes need it.
+  // Indicates whether some form of user-context token is available — either a
+  // request-scoped MCP session, or the legacy single-user refresh token on disk.
   async hasUserAuth(): Promise<boolean> {
+    if (this.sessionContext.getStore()?.ninja_refresh_token) return true;
     const stored = await this.tokenStore.load();
     return !!stored?.refresh_token;
   }
@@ -141,6 +151,17 @@ export class NinjaClient {
   // ── Technician identity ───────────────────────────────────────────────────
 
   async getTechnicianProfile(): Promise<TechnicianProfile | null> {
+    // Per-session user wins: the person who completed OAuth is the technician
+    // for this request, regardless of TECHNICIAN_EMAIL.
+    const session = this.sessionContext.getStore();
+    if (session?.user?.appUserId && session.user.email) {
+      return {
+        appUserId: session.user.appUserId,
+        email: session.user.email,
+        displayName: session.user.displayName ?? session.user.email
+      };
+    }
+
     if (this.technicianProfile !== undefined) return this.technicianProfile;
     if (!this.config.technicianEmail) {
       this.technicianProfile = null;
@@ -166,6 +187,29 @@ export class NinjaClient {
       displayName
     };
     return this.technicianProfile;
+  }
+
+  // Identifies the Ninja user behind an access token, by decoding the JWT and
+  // matching against /v2/users. Used at OAuth callback time so the session
+  // carries the user's appUserId/displayName for comment signing.
+  async identifyUserFromToken(accessToken: string): Promise<{ appUserId?: number; email?: string; displayName?: string } | undefined> {
+    const { decodeJwt, emailFromJwt } = await import("./auth.js");
+    const claims = decodeJwt(accessToken);
+    const email = claims ? emailFromJwt(claims) : undefined;
+    if (!email) return undefined;
+
+    const response = await fetch(`${this.config.ninjaApiBaseUrl}/users`, {
+      headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" }
+    });
+    if (!response.ok) return { email };
+
+    const users = (await response.json()) as unknown;
+    const list = Array.isArray(users) ? (users as unknown[]).filter(isUser) : [];
+    const match = list.find((u) => u.email?.toLowerCase() === email.toLowerCase());
+    if (!match) return { email };
+
+    const displayName = [match.firstName, match.lastName].filter(Boolean).join(" ") || email;
+    return { appUserId: match.id, email, displayName };
   }
 
   // ── Ticket forms & boards ─────────────────────────────────────────────────
@@ -311,6 +355,29 @@ export class NinjaClient {
 
   private async getAccessToken(requireUserContext = false): Promise<string> {
     const now = Date.now();
+
+    // Per-request session takes precedence. Each session has its own NinjaOne
+    // refresh token, so we don't share token caches across users.
+    const session = this.sessionContext.getStore();
+    if (session) {
+      if (session.ninja_access_token && session.ninja_access_token_expires_at && session.ninja_access_token_expires_at > now + 60_000) {
+        return session.ninja_access_token;
+      }
+      try {
+        const refreshed = await refreshAccessToken(this.config, session.ninja_refresh_token);
+        const expiresIn = refreshed.expires_in ?? 3600;
+        session.ninja_access_token = refreshed.access_token;
+        session.ninja_access_token_expires_at = now + expiresIn * 1000;
+        if (refreshed.refresh_token) session.ninja_refresh_token = refreshed.refresh_token;
+        session.last_used_at = now;
+        await this.sessionStore.putSession(session);
+        return refreshed.access_token;
+      } catch (error) {
+        console.warn("Session refresh token exchange failed:", error);
+        throw new Error(authRequiredMessage(this.config));
+      }
+    }
+
     if (this.token && this.token.expiresAtMs > now + 60_000) {
       if (!requireUserContext || this.token.userContext) return this.token.accessToken;
     }
