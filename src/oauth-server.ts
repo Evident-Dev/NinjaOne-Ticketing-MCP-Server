@@ -108,6 +108,10 @@ export async function handleAuthorize(req: Request, res: Response, config: AppCo
   const params = new URLSearchParams({
     response_type: "code",
     client_id: config.ninjaClientId,
+    // NinjaOne docs require client_secret on the authorize URL for "private
+    // client applications" (their term for confidential clients). This is
+    // non-standard for OAuth 2.0/2.1 but it's what their endpoint expects.
+    client_secret: config.ninjaClientSecret,
     redirect_uri: config.oauthRedirectUri,
     scope: config.oauthScope,
     state: ninjaState,

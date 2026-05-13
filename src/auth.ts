@@ -85,6 +85,7 @@ export function buildAuthorizeUrl(config: AppConfig, state: string): string {
   const params = new URLSearchParams({
     response_type: "code",
     client_id: config.ninjaClientId,
+    client_secret: config.ninjaClientSecret,
     redirect_uri: config.oauthRedirectUri,
     scope: config.oauthScope,
     state,
