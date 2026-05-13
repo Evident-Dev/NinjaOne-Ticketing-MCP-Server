@@ -165,7 +165,6 @@ This tool only creates the ticket. It does not run scripts, access devices, or c
       status: z.enum(["NEW", "OPEN", "WAITING", "PAUSED", "RESOLVED", "CLOSED"]).optional().describe("Initial status (defaults to NEW)"),
       requester_email: z.string().email().optional().describe("Email of the person requesting support — looked up in NinjaOne contacts to set requester"),
       form_id: z.number().int().positive().optional().describe("Ticket form ID (use ninja_list_ticket_forms to find)"),
-      board_id: z.number().int().positive().optional().describe("Board ID (use ninja_list_ticket_boards to find)"),
       tags: z.array(z.string()).optional().describe("Optional tags")
     }).strict().refine(
       (v) => v.organization_id || v.organization_name || v.organization_domain,

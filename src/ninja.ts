@@ -30,12 +30,19 @@ interface TechnicianProfile {
   displayName: string;
 }
 
+interface TicketStatusRecord {
+  statusId: number;
+  name?: string;
+  displayName?: string;
+}
+
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
 export class NinjaClient {
   private token?: CachedToken;
   private orgCache?: CachedList<NinjaOrganization>;
   private contactCache?: CachedList<NinjaContact>;
+  private statusCache?: CachedList<TicketStatusRecord>;
   private technicianProfile?: TechnicianProfile | null;
 
   constructor(private readonly config: AppConfig) {}
@@ -162,8 +169,32 @@ export class NinjaClient {
     return this.request<unknown>("/ticketing/trigger/boards", "GET");
   }
 
-  async listTicketStatuses(): Promise<unknown> {
-    return this.request<unknown>("/ticketing/statuses", "GET");
+  async listTicketStatuses(): Promise<TicketStatusRecord[]> {
+    const now = Date.now();
+    if (this.statusCache && now - this.statusCache.fetchedAtMs < CACHE_TTL_MS) {
+      return this.statusCache.items;
+    }
+    const data = await this.request<unknown>("/ticketing/statuses", "GET");
+    const items = Array.isArray(data) ? (data as unknown[]).filter(isStatusRecord) : [];
+    this.statusCache = { items, fetchedAtMs: now };
+    return items;
+  }
+
+  // Accepts a status name ("NEW", "OPEN", custom display name) or a numeric ID.
+  // Returns the statusId as a string, which is what the NinjaOne API expects in
+  // create/update payloads.
+  private async resolveStatus(status: string | number | undefined): Promise<string | undefined> {
+    if (status === undefined || status === null || status === "") return undefined;
+    if (typeof status === "number") return String(status);
+    if (/^\d+$/.test(status)) return status;
+
+    const wanted = status.trim().toLowerCase();
+    const statuses = await this.listTicketStatuses();
+    const match = statuses.find(
+      (s) => s.name?.toLowerCase() === wanted || s.displayName?.toLowerCase() === wanted
+    );
+    if (!match) throw new Error(`Unknown ticket status '${status}'. Use ninja_list_ticket_statuses to see valid options.`);
+    return String(match.statusId);
   }
 
   // ── Tickets ───────────────────────────────────────────────────────────────
@@ -173,13 +204,14 @@ export class NinjaClient {
   }
 
   async createTicket(input: CreateTicketInput): Promise<NinjaTicket> {
-    const [clientId, requesterUid, technician] = await Promise.all([
+    const [clientId, requesterUid, technician, statusId] = await Promise.all([
       this.resolveClientId(input),
       input.requester_email ? this.findContactByEmail(input.requester_email).then((c) => c?.uid) : Promise.resolve(undefined),
-      this.getTechnicianProfile()
+      this.getTechnicianProfile(),
+      this.resolveStatus(input.status)
     ]);
 
-    const payload = buildCreatePayload(input, clientId, requesterUid, technician, this.config);
+    const payload = buildCreatePayload(input, clientId, requesterUid, technician, statusId, this.config);
     return this.request<NinjaTicket>("/ticketing/ticket", "POST", payload);
   }
 
@@ -187,35 +219,43 @@ export class NinjaClient {
     const { ticket_id, comment_body, comment_public, ...ticketFields } = input;
     const technician = await this.getTechnicianProfile();
 
-    const ticketPart: Record<string, unknown> = {};
-    if (ticketFields.summary !== undefined) ticketPart.summary = ticketFields.summary;
-    if (ticketFields.status !== undefined) ticketPart.status = ticketFields.status;
-    if (ticketFields.type !== undefined) ticketPart.type = ticketFields.type;
-    if (ticketFields.priority !== undefined) ticketPart.priority = ticketFields.priority;
-    if (ticketFields.severity !== undefined) ticketPart.severity = ticketFields.severity;
-    // Explicit override takes precedence; fall back to technician profile
-    const assignee = ticketFields.assigned_app_user_id ?? technician?.appUserId;
-    if (assignee !== undefined) ticketPart.assignedAppUserId = assignee;
-
-    const commentPart: Record<string, unknown> | undefined = comment_body
-      ? { body: signComment(comment_body, technician), public: comment_public ?? true }
-      : undefined;
-
     const payload: Record<string, unknown> = {};
-    if (Object.keys(ticketPart).length > 0) payload.ticket = ticketPart;
-    if (commentPart) payload.comment = commentPart;
+    if (ticketFields.summary !== undefined) payload.subject = ticketFields.summary;
+    if (ticketFields.status !== undefined) payload.status = await this.resolveStatus(ticketFields.status);
+    if (ticketFields.type !== undefined) payload.type = ticketFields.type;
+    if (ticketFields.priority !== undefined) payload.priority = ticketFields.priority;
+    if (ticketFields.severity !== undefined) payload.severity = ticketFields.severity;
+    const assignee = ticketFields.assigned_app_user_id ?? technician?.appUserId;
+    if (assignee !== undefined) payload.assignedAppUserId = assignee;
 
-    return this.request<NinjaTicket>(`/ticketing/ticket/${ticket_id}`, "PUT", payload);
+    if (Object.keys(payload).length > 0) {
+      await this.request<unknown>(`/ticketing/ticket/${ticket_id}`, "PUT", payload);
+    }
+
+    if (comment_body) {
+      await this.addComment(ticket_id, { body: comment_body, public: comment_public ?? true });
+    }
+
+    return this.getTicket(ticket_id);
   }
 
-  async addComment(ticketId: number, comment: TicketComment): Promise<unknown> {
+  // POST /v2/ticketing/ticket/{ticketId}/comment is multipart/form-data and
+  // returns 204 No Content. Re-fetch the ticket so callers still get something
+  // meaningful back.
+  async addComment(ticketId: number, comment: TicketComment): Promise<NinjaTicket> {
     const technician = await this.getTechnicianProfile();
-    return this.request<unknown>(`/ticketing/ticket/${ticketId}/comment`, "POST", {
+    const commentObj: Record<string, unknown> = {
       body: signComment(comment.body, technician),
-      ...(comment.htmlBody ? { htmlBody: comment.htmlBody } : {}),
       public: comment.public ?? true,
+      ...(comment.htmlBody ? { htmlBody: comment.htmlBody } : {}),
       ...(comment.timeTracked ? { timeTracked: comment.timeTracked } : {})
-    });
+    };
+
+    const form = new FormData();
+    form.append("comment", new Blob([JSON.stringify(commentObj)], { type: "application/json" }));
+
+    await this.requestMultipart(`/ticketing/ticket/${ticketId}/comment`, form);
+    return this.getTicket(ticketId);
   }
 
   async listTicketLogEntries(ticketId: number): Promise<unknown> {
@@ -226,8 +266,8 @@ export class NinjaClient {
     return this.request<unknown>("/ticketing/attributes", "GET");
   }
 
-  async listTicketsForBoard(boardId: number): Promise<unknown> {
-    return this.request<unknown>(`/ticketing/trigger/board/${boardId}/run`, "POST");
+  async listTicketsForBoard(boardId: number, pageSize = 100): Promise<unknown> {
+    return this.request<unknown>(`/ticketing/trigger/board/${boardId}/run`, "POST", { pageSize });
   }
 
   // ── Private helpers ───────────────────────────────────────────────────────
@@ -312,6 +352,21 @@ export class NinjaClient {
     if (response.status === 204) return undefined as T;
     return (await response.json()) as T;
   }
+
+  private async requestMultipart(path: string, form: FormData): Promise<void> {
+    const token = await this.getAccessToken();
+    const url = `${this.config.ninjaApiBaseUrl}${path}`;
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+      body: form
+    });
+
+    if (!response.ok) {
+      throw new Error(`NinjaOne API error: POST ${path} → ${response.status} ${await safeText(response)}`);
+    }
+  }
 }
 
 // ── Payload builders ──────────────────────────────────────────────────────────
@@ -321,23 +376,22 @@ function buildCreatePayload(
   clientId: number,
   requesterUid: string | undefined,
   technician: TechnicianProfile | null,
+  statusId: string | undefined,
   config: AppConfig
 ): Record<string, unknown> {
   const ticketFormId = input.form_id ?? config.defaultTicketFormId;
-  const boardId = input.board_id ?? config.defaultBoardId;
 
   const payload: Record<string, unknown> = {
     clientId,
-    summary: input.summary,
-    description: { body: input.description }
+    subject: input.summary,
+    description: { body: input.description, public: true }
   };
 
   if (ticketFormId) payload.ticketFormId = ticketFormId;
-  if (boardId) payload.boardId = boardId;
   if (input.type) payload.type = input.type;
   if (input.priority) payload.priority = input.priority;
   if (input.severity) payload.severity = input.severity;
-  if (input.status) payload.status = input.status;
+  if (statusId) payload.status = statusId;
   if (requesterUid) payload.requesterUid = requesterUid;
   if (input.tags?.length) payload.tags = input.tags;
   if (technician) payload.assignedAppUserId = technician.appUserId;
@@ -361,6 +415,10 @@ function isContact(value: unknown): value is NinjaContact {
 
 function isUser(value: unknown): value is NinjaUser {
   return isRecord(value) && typeof value.id === "number";
+}
+
+function isStatusRecord(value: unknown): value is TicketStatusRecord {
+  return isRecord(value) && typeof value.statusId === "number";
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────

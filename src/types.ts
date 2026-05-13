@@ -24,6 +24,13 @@ export interface NinjaContact {
   jobTitle?: string;
 }
 
+export interface NinjaTicketStatusRef {
+  name?: string;
+  displayName?: string;
+  parentId?: number;
+  statusId: number;
+}
+
 export interface NinjaTicket {
   id: number;
   version: number;
@@ -31,12 +38,12 @@ export interface NinjaTicket {
   ticketFormId?: number;
   locationId?: number;
   nodeId?: number;
-  summary: string;
-  status: TicketStatus;
+  subject: string;
+  status: NinjaTicketStatusRef;
   type?: TicketType;
   source?: string;
-  priority?: number;
-  severity?: number;
+  priority?: TicketPriority;
+  severity?: TicketSeverity;
   assignedAppUserId?: number;
   requesterUid?: string;
   tags?: string[];
@@ -44,6 +51,8 @@ export interface NinjaTicket {
   deleted?: boolean;
   attributeValues?: unknown[];
   ccList?: { uids?: string[]; emails?: string[] };
+  additionalAssignedTechnicianIds?: number[];
+  followupTime?: number;
   [key: string]: unknown;
 }
 
@@ -82,7 +91,6 @@ export interface CreateTicketInput {
   status?: TicketStatus;
   requester_email?: string;
   form_id?: number;
-  board_id?: number;
   tags?: string[];
 }
 
