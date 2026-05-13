@@ -87,9 +87,15 @@ export function buildAuthorizeUrl(config: AppConfig, state: string): string {
     client_id: config.ninjaClientId,
     redirect_uri: config.oauthRedirectUri,
     scope: config.oauthScope,
-    state
+    state,
+    prompt: "login"
   });
-  return `${config.ninjaAuthorizeUrl}?${params.toString()}`;
+  const ninjaAuthorize = `${config.ninjaAuthorizeUrl}?${params.toString()}`;
+  // See oauth-server.ts: chain through NinjaOne root so login kicks in if
+  // there's no active session.
+  const origin = new URL(config.ninjaAuthorizeUrl).origin;
+  const path = new URL(ninjaAuthorize).pathname + new URL(ninjaAuthorize).search;
+  return `${origin}/?return_to=${encodeURIComponent(path)}`;
 }
 
 export interface TokenResponse {

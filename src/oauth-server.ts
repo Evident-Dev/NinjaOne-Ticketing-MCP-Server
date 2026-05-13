@@ -110,9 +110,19 @@ export async function handleAuthorize(req: Request, res: Response, config: AppCo
     client_id: config.ninjaClientId,
     redirect_uri: config.oauthRedirectUri,
     scope: config.oauthScope,
-    state: ninjaState
+    state: ninjaState,
+    prompt: "login"
   });
-  res.redirect(`${config.ninjaAuthorizeUrl}?${params.toString()}`);
+  const ninjaAuthorize = `${config.ninjaAuthorizeUrl}?${params.toString()}`;
+
+  // NinjaOne's authorize endpoint requires an active web session and does not
+  // redirect unauthenticated users to its login page — it fails with
+  // "Missing or empty sessionKey." To work around this we route the user
+  // through NinjaOne's root URL with `return_to=` so their login flow kicks
+  // in if needed; once logged in, they're forwarded to /ws/oauth/authorize.
+  const origin = new URL(config.ninjaAuthorizeUrl).origin;
+  const authorizePath = new URL(ninjaAuthorize).pathname + new URL(ninjaAuthorize).search;
+  res.redirect(`${origin}/?return_to=${encodeURIComponent(authorizePath)}`);
 }
 
 export async function handleNinjaCallbackForMcp(
