@@ -2,19 +2,26 @@
 
 A Railway-hosted MCP server that gives Claude full access to NinjaOne — tickets, customers, devices, and alerts — via separate per-domain endpoints so Claude only loads the toolset it needs.
 
-**Version:** 0.4.0
-**Status:** v0.4.0 is a ground-up rewrite of the auth layer. Tickets, comments, devices, and alerts now work via pure OAuth 2.0 client-credentials. No per-user OAuth dance.
+**Version:** 0.5.0
 
 ---
 
-## What changed in 0.4.0
+## What changed in 0.5.0
 
-- **Auth is now client_credentials only** — one API app, one set of credentials, works for reads *and* writes (ticket creation, comments, reboots). The old per-user OAuth flow is gone.
-- **Split into 5 endpoints** — `/mcp/tickets`, `/mcp/customers`, `/mcp/devices`, `/mcp/alerts`, plus `/mcp` for everything. Add only the slices you need in Claude → smaller tool-schema cost.
-- **New domains** — devices (list/get/reboot/activities) and alerts (list/summary/reset).
-- **Better error surfacing** — when NinjaOne rejects something, you now see the actual `resultCode` and `errorMessage`.
-- **Multi-region** — set `NINJA_REGION` and base URLs are derived. Supports `us, eu, oc, ca, us2, fed`.
-- **Automatic 401 retry** — if a token goes stale, we refresh and retry once.
+- **Auth model fixed for ticket writes.** NinjaOne's ticket-create / comment / update endpoints physically require a user-context OAuth token (we verified this against the API and confirmed it via two reference implementations in the wild). v0.4.0's pure machine-token approach could read but never write. v0.5.0 uses a hybrid:
+  - **Reads** (orgs, devices, alerts, lookups): machine token, no login needed.
+  - **Writes** (ticket create, comment, update, close, reboot): user-context token from a one-time browser login. The token is then refreshed automatically forever.
+- **Refresh-token rotation done correctly.** NinjaOne issues a new refresh token on every refresh; the old one dies instantly. v0.5.0 persists the rotated token to disk via atomic write *before* returning the access token to the caller, so a crash mid-flow can't lock you out. This was almost certainly the bug that quietly broke v0.3.0's per-user OAuth flow.
+- **Background keepalive.** Every 12 hours the server refreshes the token even if nothing's been calling it, so the refresh chain stays warm during quiet periods.
+- **Clear "login required" UX.** When Claude tries to write and there's no user token, the tool returns a structured error that includes the sign-in URL and tells Claude to ask the user to visit it. New `ninja_auth_status` tool so Claude can self-diagnose.
+- **Loud boot banner** if user login is missing. No silent failures.
+
+## What carried over from 0.4.0
+
+- **Split into 5 endpoints** — `/mcp/tickets`, `/mcp/customers`, `/mcp/devices`, `/mcp/alerts`, plus `/mcp` for everything.
+- **Devices and alerts domains** — list/get/reboot/activities, list/summary/reset.
+- **Multi-region** — `NINJA_REGION` (us/eu/oc/ca/us2/fed) derives base URLs.
+- **NinjaApiError with parsed resultCode/errorMessage** so failures are debuggable.
 
 ---
 
@@ -38,15 +45,30 @@ Every endpoint also exposes `ninja_status` (connection check) and `ninja_whoami`
 
 ### 1. Create a NinjaOne API app
 
-In the NinjaOne admin console:
+In the NinjaOne admin console: **Administration → Apps → API → Client app IDs → + Add client app**.
 
-1. **Administration → Apps → API → Add** (a "Client App ID").
-2. **Application Platform:** `API Services (machine-to-machine)`.
-3. **Name:** `Claude MCP` (or anything).
-4. **Redirect URIs:** leave blank — we don't use authorization-code flow.
-5. **Scopes:** check `monitoring` and `management`. (`control` and `offline_access` not needed.)
-6. **Allowed Grant Types:** check `Client Credentials`. Uncheck the others.
-7. Save. You'll be shown a **Client ID** and **Client Secret** — copy both somewhere safe. The secret is shown **once**.
+> **Important:** v0.5.0 needs a **Web application** platform app (NOT "API Services / machine-to-machine"). The Web platform is the only one that exposes the `offline_access` scope, which is what NinjaOne requires to issue refresh tokens for the one-time sign-in flow.
+
+Fill it in:
+
+1. **Application Platform:** `Web` (or whichever option exposes `offline_access` in the Scopes list — it should be the only non-M2M option).
+2. **Name:** anything (e.g. `Beardman MCP Server`).
+3. **Redirect URIs:** **`https://<your-railway-domain>/auth/callback`** — replace `<your-railway-domain>` with your actual Railway public URL. You can generate the Railway domain first (step 3 below) and come back to enter this. Required by NinjaOne and must match exactly.
+4. **Scopes:** check **Monitoring**, **Management**, and **offline_access**. (Control is optional.)
+5. **Allowed Grant Types:** check **Authorization Code**, **Client Credentials**, and **Refresh Token**. All three.
+   - *Authorization Code* — for the one-time browser sign-in
+   - *Client Credentials* — for fast machine-token reads (orgs, devices, etc.)
+   - *Refresh Token* — keeps the sign-in alive indefinitely
+6. Click **Add**. You'll be shown the **Client ID** and **Client Secret** — copy both somewhere safe. The secret is shown **once**.
+
+**Then grant API permissions** on the app's role (this is separate from OAuth scopes and is what actually controls what the app can do):
+
+7. In the app or under **Administration → Apps → API → Roles**, grant the role that this app uses at minimum:
+   - **Ticketing:** Create, Read, Update (and Delete if you want close/delete)
+   - **Devices:** Read (and Manage if you want reboots)
+   - **Organizations:** Read (and Manage if you want to create new orgs from Claude)
+   - **Alerts:** Read (and Manage if you want to reset alerts)
+8. Save.
 
 **Then grant API permissions** (this is separate from OAuth scopes and is what actually controls what the app can do):
 
@@ -78,31 +100,47 @@ If you're on a partner / whitelabel instance with its own hostname (e.g. `someth
 
 1. **Fork** this repo (or push it to your own GitHub).
 2. In Railway: **New Project → Deploy from GitHub** → pick the repo. Railway detects the Dockerfile and builds automatically.
-3. After the first deploy, go to the service's **Settings → Networking** and click **Generate Domain**. Note the public URL (e.g. `https://ninja-mcp-production.up.railway.app`).
-4. Go to **Variables** and add:
+3. **Generate a public domain** at **Settings → Networking → Generate Domain**. Note the URL (e.g. `https://ninja-mcp-production.up.railway.app`). Go back to your NinjaOne API app and paste `https://<domain>/auth/callback` into the Redirect URIs field.
+4. **Mount a Railway Volume** at `/data`. This is where the refresh token is persisted. Without it, the token is wiped on every redeploy and you'll have to sign in again each time.
+   - **Settings → Volumes → New Volume** → mount path `/data` → 100 MB is plenty.
+5. Go to **Variables** and add:
 
    | Variable | Required? | Value |
    |---|---|---|
    | `NINJA_CLIENT_ID` | **Yes** | Client ID from step 1 |
    | `NINJA_CLIENT_SECRET` | **Yes** | Client Secret from step 1 |
    | `NINJA_REGION` | Recommended | `us`, `eu`, `oc`, `ca`, `us2`, or `fed` |
-   | `MCP_SHARED_SECRET` | **Yes for production** | Any long random string — Claude uses this as a Bearer token to authenticate to the MCP endpoints. Generate one with `openssl rand -hex 32` or any password manager. |
-   | `TECHNICIAN_EMAIL` | Optional | Your NinjaOne login email — if set, comments are signed with your name and tickets default to you as assignee |
-   | `DEFAULT_TICKET_FORM_ID` | Optional | Numeric ID of your default ticket form. Find it via the `ninja_list_ticket_forms` tool after first connecting. |
+   | `MCP_SHARED_SECRET` | **Yes for production** | Long random string. Used for `/mcp/*` Bearer auth AND as the `?token=` query param on `/auth/login`. Generate with `openssl rand -hex 32`. |
+   | `TECHNICIAN_EMAIL` | Optional | Your NinjaOne login email — comments are signed with your display name and tickets default to you as assignee |
+   | `DEFAULT_TICKET_FORM_ID` | Optional | Numeric ID of your default ticket form. Find it via the `ninja_list_ticket_forms` tool after sign-in. |
+   | `PUBLIC_BASE_URL` | Auto | Railway sets `RAILWAY_PUBLIC_DOMAIN` automatically once a domain is generated — we derive the base URL from it. Only set this manually if you need to override. |
+   | `USER_TOKEN_PATH` | Default `/data/refresh-token.json` | Path inside the container where the refresh token is persisted. Must be inside a mounted volume. |
    | `NINJA_BASE_URL` | Only for whitelabel | Full base URL if not using a stock region |
-   | `NINJA_TOKEN_URL` | Rarely | Explicit OAuth token URL (overrides region) |
-   | `NINJA_API_BASE_URL` | Rarely | Explicit API base URL (overrides region) |
 
-5. Redeploy if Railway didn't automatically.
-6. Visit `https://<your-domain>/health` — should return `{ ok: true, configured: true, ... }`.
-7. Test the NinjaOne connection (replace `<SECRET>`):
-   ```
-   curl -H "Authorization: Bearer <SECRET>" \
-        https://<your-domain>/debug/test-ninja
-   ```
-   Should return `{ ok: true, orgCount: N, sample: [...] }`.
+6. Redeploy if Railway didn't automatically.
 
-### 4. Connect from Claude
+### 4. Sign in to NinjaOne (one-time)
+
+After deploy:
+
+1. Visit `https://<your-domain>/health` — should show `{ ok: true, configured: true }`.
+2. **Open this URL in a browser** (replace `<SECRET>` with your `MCP_SHARED_SECRET`):
+   ```
+   https://<your-domain>/auth/login?token=<SECRET>
+   ```
+3. You'll be redirected to NinjaOne's consent screen. Sign in with your normal NinjaOne account, approve.
+4. NinjaOne redirects back; you'll see a "Connected to NinjaOne ✓" page.
+5. The refresh token is now persisted at `/data/refresh-token.json` and will be auto-renewed forever.
+
+Verify by visiting (in a browser or with curl):
+```
+https://<your-domain>/auth/status?token=<SECRET>
+```
+You should see `{ "authenticated": true, "saved_at": "...", ... }`.
+
+**Re-authentication:** rare. The background keepalive refreshes the token every 12 hours, so as long as the server stays up the token never expires. If NinjaOne ever invalidates it (e.g. you revoke API access), the next write will fail with a clear "re-authorize" message and you just visit `/auth/login` again.
+
+### 5. Connect from Claude
 
 In Claude (Desktop, Web, or Code) add each MCP server you want. Use the URL plus the shared secret as a Bearer token.
 
@@ -207,11 +245,26 @@ curl http://localhost:3000/debug/test-ninja
 **`401 Unauthorized` from `/mcp/...`**
 You forgot to send the `Authorization: Bearer <MCP_SHARED_SECRET>` header, or it doesn't match the env var.
 
-**`NinjaOne token request failed (401)` in logs**
-Wrong `NINJA_CLIENT_ID` / `NINJA_CLIENT_SECRET`, wrong region, or the API app doesn't have **Client Credentials** as an allowed grant type.
+**Ticket create returns "No NinjaOne user-context login on file"**
+You haven't done the one-time browser sign-in yet. Open `/auth/login?token=<MCP_SHARED_SECRET>` and complete it. After that, ticket writes will work indefinitely.
 
-**Ticket create returns `403` with `user_context_required`**
-The API app is missing the **Ticketing → Create/Update** permission. Go back to step 1.8 in setup and grant it. This is a permission on the app role, not the OAuth scope.
+**Ticket create returns "NinjaOne refresh-token exchange failed"**
+Your refresh token expired or was revoked. Re-do the browser sign-in at `/auth/login?token=<MCP_SHARED_SECRET>`.
+
+**Token vanishes on every redeploy**
+You don't have a Railway Volume mounted at `/data`. Add one (Settings → Volumes → New Volume → mount path `/data`). The token will then survive redeploys.
+
+**`NinjaOne client_credentials request failed (401)` in logs**
+Wrong `NINJA_CLIENT_ID` / `NINJA_CLIENT_SECRET`, wrong region, or the API app doesn't have **Client Credentials** ticked under Allowed Grant Types. Reads will fall back to user-context (which works after sign-in), so this isn't always fatal.
+
+**Browser sign-in errors with "No refresh_token in response"**
+The API app doesn't have `offline_access` in its scopes. Re-check the app config — must be a Web platform app (not API Services / M2M), with `offline_access` ticked.
+
+**Browser sign-in errors with NinjaOne "invalid_redirect_uri"**
+The Redirect URI on your NinjaOne API app doesn't exactly match `https://<your-railway-domain>/auth/callback`. Check it character-by-character.
+
+**`NinjaOne API permission missing` / 403 even after sign-in**
+The API app's role doesn't have **Ticketing → Create/Update** granted. Go back to step 1.7 in setup and grant it.
 
 **Ticket create returns `400` with a field complaint**
 Now that errors are surfaced properly, the response body tells you which field NinjaOne is unhappy with. Common ones:
@@ -234,19 +287,22 @@ If your NinjaOne hostname isn't on the regional list, leave `NINJA_REGION` unset
 ## Architecture
 
 - One Node process serves all endpoints.
-- One shared `NinjaClient` (in `src/ninja.ts`) handles token caching, 401 retry, and request-level errors.
+- One shared `NinjaClient` (in `src/ninja.ts`) handles both auth flows and request-level errors.
+- `UserOAuth` (in `src/user-oauth.ts`) owns the user-context refresh-token lifecycle, including immediate persistence of rotated tokens via atomic file writes.
 - Each `/mcp/<slice>` endpoint builds a fresh `McpServer` per request and registers only that slice's tool set. Stateless. No cross-request session bookkeeping.
-- The OAuth token is cached in memory, preemptively refreshed 2 minutes before expiry, and concurrent acquisitions are deduplicated.
+- Background keepalive refreshes the user-context token every 12 hours so it never goes stale during quiet periods.
 
 ```
 src/
-  index.ts          ← Express app, endpoint routing
+  index.ts          ← Express app, endpoint routing, boot banners
   config.ts         ← env vars + region → URL derivation
   types.ts          ← shared types
-  ninja.ts          ← NinjaClient (HTTP + auth + cache)
+  ninja.ts          ← NinjaClient (HTTP + dual auth + cache)
+  user-oauth.ts     ← Authorization Code + Refresh Token lifecycle
+  auth-routes.ts    ← /auth/login, /auth/callback, /auth/status
   domains/
     common.ts       ← DomainContext + jsonResult helper
-    status.ts       ← ninja_status, ninja_whoami (every endpoint)
+    status.ts       ← ninja_status, ninja_whoami, ninja_auth_status
     tickets.ts      ← ticket tools
     customers.ts    ← organization + contact tools
     devices.ts      ← device tools
