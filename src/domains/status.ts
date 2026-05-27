@@ -52,20 +52,30 @@ export function registerStatusDomain({ server, ninja, config }: DomainContext): 
     "ninja_whoami",
     {
       title: "NinjaOne Technician Identity",
-      description: "Return the technician profile this server is configured to act as (set via TECHNICIAN_EMAIL). This is whose name will appear on ticket comments.",
+      description:
+        "Return the technician whose name will appear on tickets and comments for the CURRENT connection. " +
+        "Priority: explicit tool argument > per-tech URL token (NINJA_TECHNICIANS) > TECHNICIAN_EMAIL config. " +
+        "Reports which source resolved the identity so multi-tech deployments can debug who they are.",
       inputSchema: z.object({}).strict(),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
     },
     async () => {
+      const resolved = ninja.resolveTechnicianEmail();
       const profile = await ninja.getTechnicianProfile();
       if (!profile) {
         return jsonResult({
           configured: false,
-          message: "TECHNICIAN_EMAIL is not set. Tickets will not be auto-assigned and comments will not be signed."
+          source: resolved.source,
+          requested_email: resolved.email ?? null,
+          message:
+            resolved.source === "none"
+              ? "No technician identity configured. Either connect via a personal URL token (NINJA_TECHNICIANS) or set TECHNICIAN_EMAIL on the server."
+              : `Email "${resolved.email}" was provided (source: ${resolved.source}) but no matching NinjaOne user was found. Tickets won't be auto-assigned and comments won't be signed.`
         });
       }
       return jsonResult({
         configured: true,
+        source: resolved.source,
         display_name: profile.displayName,
         email: profile.email,
         ninja_user_id: profile.appUserId

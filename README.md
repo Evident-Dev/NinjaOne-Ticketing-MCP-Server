@@ -2,7 +2,14 @@
 
 A Railway-hosted MCP server that gives Claude full access to NinjaOne — tickets, customers, devices, and alerts — via separate per-domain endpoints so Claude only loads the toolset it needs.
 
-**Version:** 0.5.0
+**Version:** 0.6.0
+
+## What changed in 0.6.0
+
+- **Per-technician tokens.** Multi-tech teams can now share one MCP deployment with per-tech identity. Each tech gets a personal token they append to the MCP URL (`?token=<their-token>`). The server validates the token against an allowlist (`NINJA_TECHNICIANS`), rejects unknown tokens with 401, and uses the matched email as the auto-assignee + comment signer for that connection.
+- **Identity from URL, not headers** — works with Claude.ai's custom-connector UI (which doesn't expose a header field).
+- **`ninja_whoami` now reports which identity source resolved** — `url-token`, `config` (TECHNICIAN_EMAIL fallback), or `none`. Great for debugging "wait, why is the wrong tech on this ticket?"
+- **Backward compatible**: `MCP_SHARED_SECRET` still works for admin / single-tech setups. If `NINJA_TECHNICIANS` is empty, behavior is identical to 0.5.x.
 
 ---
 
@@ -140,27 +147,67 @@ You should see `{ "authenticated": true, "saved_at": "...", ... }`.
 
 **Re-authentication:** rare. The background keepalive refreshes the token every 12 hours, so as long as the server stays up the token never expires. If NinjaOne ever invalidates it (e.g. you revoke API access), the next write will fail with a clear "re-authorize" message and you just visit `/auth/login` again.
 
-### 5. Connect from Claude
+### 5. (Multi-tech only) Configure per-technician tokens
+
+Skip this if you're a one-person shop — the `MCP_SHARED_SECRET` + `TECHNICIAN_EMAIL` from earlier works fine.
+
+For a team where each tech should see their own name on tickets they create:
+
+1. Generate one token per tech (any long random string, e.g. `openssl rand -hex 24`).
+2. Set the `NINJA_TECHNICIANS` env var in Railway. Two accepted formats:
+
+   **JSON** (recommended for >2 techs):
+   ```json
+   [
+     {"email":"alice@beardmangroup.com","token":"tok_alice_long_random","name":"Alice"},
+     {"email":"bob@beardmangroup.com","token":"tok_bob_long_random","name":"Bob"}
+   ]
+   ```
+
+   **CSV**:
+   ```
+   alice@beardmangroup.com:tok_alice_long_random:Alice,bob@beardmangroup.com:tok_bob_long_random:Bob
+   ```
+
+3. Redeploy. The boot logs should print: `[ninja-mcp] 2 per-tech token(s) registered: alice@...,bob@...`.
+4. Each tech connects to a personal URL — see step 6 below.
+
+The token IS the identity. It's not authenticated cryptographically — it's a bearer token like a personal API key. If a tech leaves, remove their entry from `NINJA_TECHNICIANS` and redeploy.
+
+### 6. Connect from Claude
 
 In Claude (Desktop, Web, or Code) add each MCP server you want. Use the URL plus the shared secret as a Bearer token.
 
-**Claude Desktop / Code config example** (`mcp_servers` in your config):
+**Single-tech (MCP_SHARED_SECRET) — Claude Desktop / Code:**
 ```json
 {
   "mcpServers": {
     "ninja-tickets": {
       "url": "https://<your-domain>/mcp/tickets",
       "headers": { "Authorization": "Bearer <MCP_SHARED_SECRET>" }
-    },
-    "ninja-customers": {
-      "url": "https://<your-domain>/mcp/customers",
-      "headers": { "Authorization": "Bearer <MCP_SHARED_SECRET>" }
     }
   }
 }
 ```
 
-**Claude.ai (web) custom MCP connector:** paste the endpoint URL, then add an `Authorization: Bearer <MCP_SHARED_SECRET>` header.
+**Multi-tech (per-tech tokens) — each tech adds their personal URL:**
+```json
+{
+  "mcpServers": {
+    "ninja-tickets": {
+      "url": "https://<your-domain>/mcp/tickets?token=<YOUR_PERSONAL_TOKEN>"
+    }
+  }
+}
+```
+No `Authorization` header needed — the token goes in the URL as `?token=...`.
+
+**Claude.ai (web) custom connector:**
+- **Name:** "NinjaOne Tickets" (or whatever).
+- **Remote MCP server URL:** `https://<your-domain>/mcp/tickets?token=<YOUR_PERSONAL_TOKEN>`
+- Leave OAuth fields blank.
+
+Each tech's URL only authorizes them as themselves — comments and assignments are attributed to their NinjaOne user. Sharing the URL = impersonation, so treat the token like a password.
 
 > Add as many or as few endpoints as you want. A help-desk workflow really only needs `tickets` + `customers`. Skipping `devices` and `alerts` saves Claude from loading their tool schemas, which costs tokens on every turn.
 

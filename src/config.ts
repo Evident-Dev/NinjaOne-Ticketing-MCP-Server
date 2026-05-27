@@ -14,6 +14,12 @@ export type NinjaRegion = keyof typeof REGION_BASE_URLS;
 
 const VALID_REGIONS = Object.keys(REGION_BASE_URLS) as NinjaRegion[];
 
+export interface TechnicianEntry {
+  email: string;
+  token: string;
+  name?: string;
+}
+
 export interface AppConfig {
   port: number;
   ninjaRegion: NinjaRegion;
@@ -28,6 +34,7 @@ export interface AppConfig {
   oauthRedirectUri?: string;
   userTokenPath: string;    // where the refresh token is persisted on disk
   mcpSharedSecret?: string;
+  technicians: TechnicianEntry[];  // allowlist of per-tech tokens → email
   defaultTicketFormId?: number;
   defaultBoardId?: number;
   technicianEmail?: string;
@@ -53,6 +60,41 @@ function optionalNumber(name: string): number | undefined {
 
 function stripTrailingSlash(url: string): string {
   return url.replace(/\/+$/, "");
+}
+
+// Parses NINJA_TECHNICIANS — accepts either:
+//   JSON array:   [{"email":"alice@x.com","token":"abc","name":"Alice"}, ...]
+//   Compact CSV:  alice@x.com:abc:Alice,bob@x.com:def:Bob   (name optional)
+// Returns [] if unset. Logs a warning on parse error but does not throw — the
+// server still boots with no allowlist, falling back to MCP_SHARED_SECRET.
+function parseTechnicians(raw: string): TechnicianEntry[] {
+  if (!raw) return [];
+  const trimmed = raw.trim();
+  if (trimmed.startsWith("[")) {
+    try {
+      const arr = JSON.parse(trimmed) as Array<{ email?: string; token?: string; name?: string }>;
+      return arr
+        .filter((e) => typeof e?.email === "string" && typeof e?.token === "string")
+        .map((e) => ({ email: e.email!.toLowerCase(), token: e.token!, name: e.name }));
+    } catch (err) {
+      console.warn("Failed to parse NINJA_TECHNICIANS as JSON:", (err as Error).message);
+      return [];
+    }
+  }
+  // CSV form: email:token[:name], comma-separated
+  return trimmed
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((entry): TechnicianEntry | null => {
+      const [email, token, ...nameParts] = entry.split(":");
+      if (!email || !token) return null;
+      const name = nameParts.join(":");
+      return name
+        ? { email: email.toLowerCase(), token, name }
+        : { email: email.toLowerCase(), token };
+    })
+    .filter((e): e is TechnicianEntry => e !== null);
 }
 
 export function loadConfig(): AppConfig {
@@ -101,6 +143,7 @@ export function loadConfig(): AppConfig {
     oauthRedirectUri: oauthRedirectUri || undefined,
     userTokenPath: optional("USER_TOKEN_PATH") || "/data/refresh-token.json",
     mcpSharedSecret: process.env.MCP_SHARED_SECRET?.trim() || undefined,
+    technicians: parseTechnicians(optional("NINJA_TECHNICIANS")),
     defaultTicketFormId: optionalNumber("DEFAULT_TICKET_FORM_ID"),
     defaultBoardId: optionalNumber("DEFAULT_BOARD_ID"),
     technicianEmail: process.env.TECHNICIAN_EMAIL?.trim() || undefined
