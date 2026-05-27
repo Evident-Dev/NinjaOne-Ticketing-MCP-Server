@@ -1,4 +1,5 @@
 import type { AppConfig } from "./config.js";
+import { getRequestTechnicianEmail } from "./request-context.js";
 import { UserOAuth, UserOAuthError } from "./user-oauth.js";
 import type {
   CreateTicketInput,
@@ -70,7 +71,9 @@ export class NinjaClient {
   private orgCache?: CachedList<NinjaOrganization>;
   private contactCache?: CachedList<NinjaContact>;
   private statusCache?: CachedList<TicketStatusRecord>;
-  private technicianProfile?: TechnicianProfile | null;
+  // Keyed by lowercased email so a multi-tech deployment doesn't refetch /users
+  // once per tech.
+  private technicianProfileCache = new Map<string, TechnicianProfile | null>();
   readonly userOAuth: UserOAuth;
 
   constructor(private readonly config: AppConfig) {
@@ -284,34 +287,62 @@ export class NinjaClient {
 
   // ── Technician identity ───────────────────────────────────────────────────
 
-  async getTechnicianProfile(): Promise<TechnicianProfile | null> {
-    if (this.technicianProfile !== undefined) return this.technicianProfile;
-    if (!this.config.technicianEmail) {
-      this.technicianProfile = null;
-      return null;
+  // Resolves the technician identity for the current request. Priority:
+  //   1. explicit email argument (per-tool-call override)
+  //   2. X-Ninja-Technician-Email header on the MCP request
+  //   3. TECHNICIAN_EMAIL env var (server default)
+  //   4. none (no auto-assignment, comments unsigned)
+  //
+  // Returns the resolved tech and which source it came from so tools like
+  // ninja_whoami can be transparent.
+  async getTechnicianProfile(
+    explicitEmail?: string
+  ): Promise<TechnicianProfile | null> {
+    const source = this.resolveTechnicianEmail(explicitEmail);
+    if (!source.email) return null;
+
+    const cacheKey = source.email.toLowerCase();
+    if (this.technicianProfileCache.has(cacheKey)) {
+      return this.technicianProfileCache.get(cacheKey) ?? null;
     }
 
     const users = await this.request<unknown>("/users", "GET");
     const list = Array.isArray(users) ? (users as unknown[]).filter(isUser) : [];
-    const match = list.find(
-      (u) => u.email?.toLowerCase() === this.config.technicianEmail!.toLowerCase()
-    );
+    const match = list.find((u) => u.email?.toLowerCase() === cacheKey);
 
     if (!match) {
-      console.warn(`TECHNICIAN_EMAIL "${this.config.technicianEmail}" not found in NinjaOne users.`);
-      this.technicianProfile = null;
+      console.warn(
+        `Technician email "${source.email}" (source: ${source.source}) not found in NinjaOne users.`
+      );
+      this.technicianProfileCache.set(cacheKey, null);
       return null;
     }
 
     const displayName = [match.firstName, match.lastName].filter(Boolean).join(" ") || match.email!;
-    this.technicianProfile = {
+    const profile: TechnicianProfile = {
       appUserId: match.id,
       firstName: match.firstName,
       lastName: match.lastName,
       email: match.email!,
       displayName
     };
-    return this.technicianProfile;
+    this.technicianProfileCache.set(cacheKey, profile);
+    return profile;
+  }
+
+  // Reports which technician identity applies to the current request, along
+  // with the source — useful for ninja_whoami to be transparent.
+  resolveTechnicianEmail(explicitEmail?: string): {
+    email?: string;
+    source: "tool-arg" | "url-token" | "config" | "none";
+  } {
+    if (explicitEmail) return { email: explicitEmail, source: "tool-arg" };
+    const fromRequest = getRequestTechnicianEmail();
+    if (fromRequest) return { email: fromRequest, source: "url-token" };
+    if (this.config.technicianEmail) {
+      return { email: this.config.technicianEmail, source: "config" };
+    }
+    return { source: "none" };
   }
 
   // ── Ticket metadata ───────────────────────────────────────────────────────

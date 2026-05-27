@@ -5,6 +5,7 @@ import { getMissingVars, loadConfig } from "./config.js";
 import { NinjaApiError, NinjaClient } from "./ninja.js";
 import { buildAuthRoutes } from "./auth-routes.js";
 import { UserOAuthError } from "./user-oauth.js";
+import { withRequestContext, type AuthMode } from "./request-context.js";
 import { registerStatusDomain } from "./domains/status.js";
 import { registerTicketsDomain } from "./domains/tickets.js";
 import { registerCustomersDomain } from "./domains/customers.js";
@@ -12,7 +13,7 @@ import { registerDevicesDomain } from "./domains/devices.js";
 import { registerAlertsDomain } from "./domains/alerts.js";
 import type { DomainRegister } from "./domains/common.js";
 
-const SERVER_VERSION = "0.5.3";
+const SERVER_VERSION = "0.6.0";
 
 const config = loadConfig();
 const ninja = new NinjaClient(config);
@@ -131,11 +132,15 @@ app.listen(config.port, async () => {
     return;
   }
 
-  if (!config.mcpSharedSecret) {
+  if (!config.mcpSharedSecret && config.technicians.length === 0) {
     console.warn("");
-    console.warn("WARNING: MCP_SHARED_SECRET is not set — /mcp endpoints are");
-    console.warn("UNAUTHENTICATED. Fine for local dev, NOT safe for production.");
+    console.warn("WARNING: No MCP_SHARED_SECRET and no NINJA_TECHNICIANS configured.");
+    console.warn("/mcp endpoints are UNAUTHENTICATED. Fine for local dev, NOT for prod.");
     console.warn("");
+  } else if (config.technicians.length > 0) {
+    console.log(
+      `[ninja-mcp] ${config.technicians.length} per-tech token(s) registered: ${config.technicians.map((t) => t.email).join(", ")}`
+    );
   }
 
   if (!config.publicBaseUrl) {
@@ -181,7 +186,10 @@ app.listen(config.port, async () => {
 // ── Endpoint wiring ──────────────────────────────────────────────────────────
 
 function mountMcpEndpoint(path: string, slice: SliceName): void {
-  app.post(path, requireSharedSecret, requireConfigured, async (req, res) => {
+  app.post(path, requireMcpAuth, requireConfigured, async (req, res) => {
+    // Resolve auth mode from request — set by requireMcpAuth middleware.
+    const auth: AuthMode = (req as Request & { mcpAuth?: AuthMode }).mcpAuth ?? { kind: "open" };
+
     // Fresh server + transport per request. Stateless. Avoids any cross-request
     // session bookkeeping.
     const server = buildServer(slice);
@@ -196,8 +204,10 @@ function mountMcpEndpoint(path: string, slice: SliceName): void {
     });
 
     try {
-      await server.connect(transport);
-      await transport.handleRequest(req, res, req.body);
+      await withRequestContext({ auth }, async () => {
+        await server.connect(transport);
+        await transport.handleRequest(req, res, req.body);
+      });
     } catch (error) {
       console.error(`MCP request failed at ${path}:`, error);
       if (!res.headersSent) {
@@ -246,4 +256,63 @@ function requireSharedSecret(req: Request, res: Response, next: NextFunction): v
     return;
   }
   next();
+}
+
+// /mcp/* auth — accepts EITHER:
+//   1. A per-technician token (?token=... or Bearer) that matches a configured
+//      entry in NINJA_TECHNICIANS. Resolves to that tech's identity for
+//      assignment and comment signing.
+//   2. The MCP_SHARED_SECRET — admin/fallback access, no per-request identity
+//      (falls back to TECHNICIAN_EMAIL config).
+//
+// If NINJA_TECHNICIANS is non-empty, the shared secret is still accepted but
+// flagged as such. If NINJA_TECHNICIANS is empty and MCP_SHARED_SECRET is set,
+// behavior is unchanged from earlier versions. If both are empty, the endpoint
+// is open (local dev).
+function requireMcpAuth(req: Request, res: Response, next: NextFunction): void {
+  const headerToken = req.header("authorization")?.replace(/^Bearer\s+/i, "");
+  const queryToken = typeof req.query.token === "string" ? req.query.token : undefined;
+  const presented = headerToken ?? queryToken;
+
+  // Try per-technician allowlist first.
+  if (presented && config.technicians.length > 0) {
+    const tech = config.technicians.find((t) => t.token === presented);
+    if (tech) {
+      (req as Request & { mcpAuth?: AuthMode }).mcpAuth = {
+        kind: "technician",
+        email: tech.email,
+        name: tech.name
+      };
+      next();
+      return;
+    }
+  }
+
+  // Fallback to shared secret (admin / legacy).
+  if (config.mcpSharedSecret && presented === config.mcpSharedSecret) {
+    (req as Request & { mcpAuth?: AuthMode }).mcpAuth = { kind: "shared-secret" };
+    next();
+    return;
+  }
+
+  // Local dev: no auth configured.
+  if (!config.mcpSharedSecret && config.technicians.length === 0) {
+    (req as Request & { mcpAuth?: AuthMode }).mcpAuth = { kind: "open" };
+    next();
+    return;
+  }
+
+  // Reject — no valid token.
+  res
+    .status(401)
+    .set("WWW-Authenticate", `Bearer realm="MCP"`)
+    .json({
+      ok: false,
+      error:
+        "Unauthorized. Append ?token=<your-personal-token> to the URL, or send Authorization: Bearer <token>.",
+      hint:
+        config.technicians.length > 0
+          ? "This server is configured with per-technician tokens. Ask your admin for your personal token."
+          : "This server is configured with a shared secret. The presented token doesn't match."
+    });
 }
