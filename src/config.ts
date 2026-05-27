@@ -34,7 +34,8 @@ export interface AppConfig {
   oauthRedirectUri?: string;
   userTokenPath: string;    // where the refresh token is persisted on disk
   mcpSharedSecret?: string;
-  technicians: TechnicianEntry[];  // allowlist of per-tech tokens → email
+  technicians: TechnicianEntry[];  // env-var fallback allowlist (used if no DATABASE_URL)
+  databaseUrl?: string;            // Railway Postgres connection string
   defaultTicketFormId?: number;
   defaultBoardId?: number;
   technicianEmail?: string;
@@ -144,6 +145,7 @@ export function loadConfig(): AppConfig {
     userTokenPath: optional("USER_TOKEN_PATH") || "/data/refresh-token.json",
     mcpSharedSecret: process.env.MCP_SHARED_SECRET?.trim() || undefined,
     technicians: parseTechnicians(optional("NINJA_TECHNICIANS")),
+    databaseUrl: optional("DATABASE_URL") || undefined,
     defaultTicketFormId: optionalNumber("DEFAULT_TICKET_FORM_ID"),
     defaultBoardId: optionalNumber("DEFAULT_BOARD_ID"),
     technicianEmail: process.env.TECHNICIAN_EMAIL?.trim() || undefined

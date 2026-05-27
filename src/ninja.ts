@@ -330,6 +330,17 @@ export class NinjaClient {
     return profile;
   }
 
+  // Returns every NinjaOne user with userType === "TECHNICIAN" (and not
+  // disabled). Used by the technician-store sync to seed the DB with one row
+  // per real technician.
+  async listTechnicianUsers(): Promise<NinjaUser[]> {
+    const data = await this.request<unknown>("/users", "GET");
+    const list = Array.isArray(data) ? (data as unknown[]).filter(isUser) : [];
+    return list.filter(
+      (u) => u.userType === "TECHNICIAN" && u.enabled !== false && !!u.email
+    );
+  }
+
   // Reports which technician identity applies to the current request, along
   // with the source — useful for ninja_whoami to be transparent.
   resolveTechnicianEmail(explicitEmail?: string): {
