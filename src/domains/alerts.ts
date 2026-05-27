@@ -3,9 +3,9 @@ import { jsonResult, type DomainContext } from "./common.js";
 
 export function registerAlertsDomain({ server, ninja }: DomainContext): void {
   server.registerTool(
-    "ninja_list_alerts",
+    "ninja_alert_list",
     {
-      title: "List Alerts",
+      title: "Alert: List",
       description: "List active alerts. Optionally scope to a device or alert source type. Read-only.",
       inputSchema: z.object({
         device_id: z.coerce.number().int().positive().optional(),
@@ -20,9 +20,9 @@ export function registerAlertsDomain({ server, ninja }: DomainContext): void {
   );
 
   server.registerTool(
-    "ninja_alerts_summary",
+    "ninja_alert_summary",
     {
-      title: "Alert Summary by Severity",
+      title: "Alert: Summary by Severity",
       description: "Count current alerts grouped by severity. Useful for at-a-glance NOC reporting.",
       inputSchema: z.object({
         device_id: z.coerce.number().int().positive().optional()
@@ -41,9 +41,9 @@ export function registerAlertsDomain({ server, ninja }: DomainContext): void {
   );
 
   server.registerTool(
-    "ninja_reset_alert",
+    "ninja_alert_reset",
     {
-      title: "Reset Alert",
+      title: "Alert: Reset",
       description: "Acknowledge / dismiss a single alert by its UID.",
       inputSchema: z.object({
         alert_uid: z.string().min(1)

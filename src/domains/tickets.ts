@@ -2,13 +2,13 @@ import { z } from "zod";
 import { jsonResult, type DomainContext } from "./common.js";
 
 export function registerTicketsDomain({ server, ninja }: DomainContext): void {
-  // ── Metadata ───────────────────────────────────────────────────────────────
+  // ── Ticketing metadata ─────────────────────────────────────────────────────
 
   server.registerTool(
-    "ninja_list_ticket_forms",
+    "ninja_ticket_list_forms",
     {
-      title: "List Ticket Forms",
-      description: "Return NinjaOne ticket forms so you can choose a form ID. Read-only.",
+      title: "Ticket: List Forms",
+      description: "Return NinjaOne ticket forms so you can choose a form_id when creating a ticket. Read-only.",
       inputSchema: z.object({}).strict(),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
     },
@@ -16,10 +16,10 @@ export function registerTicketsDomain({ server, ninja }: DomainContext): void {
   );
 
   server.registerTool(
-    "ninja_list_ticket_boards",
+    "ninja_ticket_list_boards",
     {
-      title: "List Ticket Boards",
-      description: "Return NinjaOne ticket boards (saved filter views) so you can choose a board ID. Read-only.",
+      title: "Ticket: List Boards",
+      description: "Return NinjaOne ticket boards (saved filter views). Pass board IDs to ninja_ticket_list_for_board. Read-only.",
       inputSchema: z.object({}).strict(),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
     },
@@ -27,9 +27,9 @@ export function registerTicketsDomain({ server, ninja }: DomainContext): void {
   );
 
   server.registerTool(
-    "ninja_list_ticket_statuses",
+    "ninja_ticket_list_statuses",
     {
-      title: "List Ticket Statuses",
+      title: "Ticket: List Statuses",
       description: "Return the configured ticket statuses for this NinjaOne tenant. Read-only.",
       inputSchema: z.object({}).strict(),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
@@ -38,22 +38,22 @@ export function registerTicketsDomain({ server, ninja }: DomainContext): void {
   );
 
   server.registerTool(
-    "ninja_list_ticket_attributes",
+    "ninja_ticket_list_attributes",
     {
-      title: "List Ticket Attributes",
-      description: "Return the available ticket attribute definitions (custom fields, drop-down options). Use these IDs in the `attributes` field on ticket create/update.",
+      title: "Ticket: List Attributes",
+      description: "Return the available ticket attribute definitions (custom fields, drop-down options). Use these IDs in the `attributes` field on ninja_ticket_create / ninja_ticket_update.",
       inputSchema: z.object({}).strict(),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
     },
     async () => jsonResult(await ninja.listTicketAttributes())
   );
 
-  // ── Reads ──────────────────────────────────────────────────────────────────
+  // ── Ticket reads ───────────────────────────────────────────────────────────
 
   server.registerTool(
-    "ninja_get_ticket",
+    "ninja_ticket_get",
     {
-      title: "Get Ticket",
+      title: "Ticket: Get",
       description: "Retrieve a NinjaOne ticket by numeric ID.",
       inputSchema: z.object({
         ticket_id: z.coerce.number().int().positive().describe("NinjaOne ticket ID")
@@ -64,9 +64,9 @@ export function registerTicketsDomain({ server, ninja }: DomainContext): void {
   );
 
   server.registerTool(
-    "ninja_get_ticket_log",
+    "ninja_ticket_get_log",
     {
-      title: "Get Ticket Log",
+      title: "Ticket: Get Activity Log",
       description: "Return the full activity and comment log for a ticket. Includes notes, status changes, and replies.",
       inputSchema: z.object({
         ticket_id: z.coerce.number().int().positive().describe("NinjaOne ticket ID")
@@ -77,10 +77,10 @@ export function registerTicketsDomain({ server, ninja }: DomainContext): void {
   );
 
   server.registerTool(
-    "ninja_list_tickets_for_board",
+    "ninja_ticket_list_for_board",
     {
-      title: "List Tickets for Board",
-      description: "Return tickets currently on a specific board. Use ninja_list_ticket_boards to find board IDs.",
+      title: "Ticket: List for Board",
+      description: "Return tickets currently on a specific board. Use ninja_ticket_list_boards to find board IDs.",
       inputSchema: z.object({
         board_id: z.coerce.number().int().positive().describe("NinjaOne board ID")
       }).strict(),
@@ -89,12 +89,12 @@ export function registerTicketsDomain({ server, ninja }: DomainContext): void {
     async ({ board_id }) => jsonResult(await ninja.listTicketsForBoard(board_id))
   );
 
-  // ── Writes ─────────────────────────────────────────────────────────────────
+  // ── Ticket writes ──────────────────────────────────────────────────────────
 
   server.registerTool(
-    "ninja_create_ticket",
+    "ninja_ticket_create",
     {
-      title: "Create Ticket",
+      title: "Ticket: Create",
       description: `Create a NinjaOne support ticket for a client organization.
 
 Org resolution (provide one):
@@ -102,7 +102,9 @@ Org resolution (provide one):
 2. organization_domain — e.g. "acme.com"; matched against contact emails
 3. organization_name — fuzzy matched; errors if ambiguous
 
-Optional: pass requester_email and the server looks up the contact UID. Pass attributes (a map of attribute_id → value) to set custom fields.`,
+Optional: pass requester_email and the server looks up the contact UID. Pass attributes (a map of attribute_id → value) to set custom fields.
+
+If you don't know the org_id, call ninja_org_find or ninja_org_find_by_domain first.`,
       inputSchema: z.object({
         organization_name: z.string().min(2).optional(),
         organization_id: z.coerce.number().int().positive().optional(),
@@ -135,20 +137,20 @@ Optional: pass requester_email and the server looks up the contact UID. Pass att
   );
 
   server.registerTool(
-    "ninja_update_ticket",
+    "ninja_ticket_update",
     {
-      title: "Update Ticket",
+      title: "Ticket: Update",
       description: `Update an existing ticket. Only supply fields you want to change.
 
-To close a ticket: set status to "RESOLVED" or "CLOSED".
-To re-open: set status to "OPEN".
-To pause pending client reply: set status to "WAITING".
+To put on hold pending client reply: set status to "WAITING".
+To re-open after resolving: set status to "OPEN".
+To resolve / mark done: use ninja_ticket_resolve instead (cleaner UX).
 
 A comment can be attached in the same call via comment_body.`,
       inputSchema: z.object({
         ticket_id: z.coerce.number().int().positive(),
         summary: z.string().min(3).max(200).optional(),
-        status: z.string().optional().describe("Status name (NEW, OPEN, WAITING, PAUSED, RESOLVED, CLOSED) or numeric statusId"),
+        status: z.string().optional().describe("Status name (NEW, OPEN, WAITING, PAUSED, RESOLVED) or numeric statusId. NinjaOne does not allow direct transition to CLOSED."),
         type: z.enum(["PROBLEM", "QUESTION", "INCIDENT", "TASK"]).optional(),
         priority: z.enum(["NONE", "LOW", "MEDIUM", "HIGH"]).optional(),
         severity: z.enum(["NONE", "MINOR", "MODERATE", "MAJOR", "CRITICAL"]).optional(),
@@ -167,11 +169,11 @@ A comment can be attached in the same call via comment_body.`,
   );
 
   server.registerTool(
-    "ninja_close_ticket",
+    "ninja_ticket_resolve",
     {
-      title: "Resolve Ticket",
+      title: "Ticket: Resolve",
       description:
-        "Convenience: set a ticket's status to RESOLVED (the standard 'done' state). NinjaOne treats CLOSED as a terminal archive state reached automatically from RESOLVED after a delay or via system rules — direct close is rejected. Optionally include a final comment.",
+        "Convenience: set a ticket's status to RESOLVED (the standard 'done' state). NinjaOne treats CLOSED as a terminal archive state reached automatically from RESOLVED — direct close is rejected. Optionally include a final comment.",
       inputSchema: z.object({
         ticket_id: z.coerce.number().int().positive(),
         comment_body: z.string().min(1).optional(),
@@ -196,9 +198,9 @@ A comment can be attached in the same call via comment_body.`,
   );
 
   server.registerTool(
-    "ninja_add_comment",
+    "ninja_ticket_add_comment",
     {
-      title: "Add Ticket Comment",
+      title: "Ticket: Add Comment",
       description: `Add a public reply (client-visible) or internal note to a ticket.
 
 time_tracked is in seconds and is optional.`,

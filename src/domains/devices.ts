@@ -3,9 +3,9 @@ import { jsonResult, type DomainContext } from "./common.js";
 
 export function registerDevicesDomain({ server, ninja }: DomainContext): void {
   server.registerTool(
-    "ninja_list_devices",
+    "ninja_device_list",
     {
-      title: "List Devices",
+      title: "Device: List",
       description: "List devices, optionally filtered by organization. Read-only.",
       inputSchema: z.object({
         organization_id: z.coerce.number().int().positive().optional(),
@@ -25,9 +25,9 @@ export function registerDevicesDomain({ server, ninja }: DomainContext): void {
   );
 
   server.registerTool(
-    "ninja_get_device",
+    "ninja_device_get",
     {
-      title: "Get Device",
+      title: "Device: Get",
       description: "Get a single device by ID.",
       inputSchema: z.object({
         device_id: z.coerce.number().int().positive()
@@ -38,9 +38,9 @@ export function registerDevicesDomain({ server, ninja }: DomainContext): void {
   );
 
   server.registerTool(
-    "ninja_device_activities",
+    "ninja_device_list_activities",
     {
-      title: "Device Activity Log",
+      title: "Device: List Activities",
       description: "Recent activity log entries for a device (alerts, jobs, status changes).",
       inputSchema: z.object({
         device_id: z.coerce.number().int().positive(),
@@ -52,9 +52,9 @@ export function registerDevicesDomain({ server, ninja }: DomainContext): void {
   );
 
   server.registerTool(
-    "ninja_reboot_device",
+    "ninja_device_reboot",
     {
-      title: "Reboot Device",
+      title: "Device: Reboot",
       description: "Schedule a reboot for a device. DESTRUCTIVE — confirm with the user first.",
       inputSchema: z.object({
         device_id: z.coerce.number().int().positive(),
