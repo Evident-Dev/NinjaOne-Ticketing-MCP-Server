@@ -95,6 +95,27 @@ app.listen(config.port, () => {
     `NinjaOne MCP server v${SERVER_VERSION} listening on :${config.port} (region: ${config.ninjaRegion})`
   );
   console.log(`Endpoints: /mcp, /mcp/tickets, /mcp/customers, /mcp/devices, /mcp/alerts`);
+
+  const missing = getMissingVars();
+  if (missing.length > 0) {
+    console.error("");
+    console.error("============================================================");
+    console.error("  CONFIGURATION INCOMPLETE — server is running but unusable");
+    console.error("============================================================");
+    console.error("  Missing required variable(s):");
+    for (const name of missing) console.error(`    - ${name}`);
+    console.error("");
+    console.error("  Fix: open this service in Railway → Variables tab,");
+    console.error("       add the variable(s) above, then redeploy.");
+    console.error("  See README → Setup for where to find the values.");
+    console.error("============================================================");
+    console.error("");
+  } else if (!config.mcpSharedSecret) {
+    console.warn("");
+    console.warn("WARNING: MCP_SHARED_SECRET is not set — /mcp endpoints are");
+    console.warn("UNAUTHENTICATED. Fine for local dev, NOT safe for production.");
+    console.warn("");
+  }
 });
 
 // ── Endpoint wiring ──────────────────────────────────────────────────────────
@@ -140,8 +161,9 @@ function requireConfigured(_req: Request, res: Response, next: NextFunction): vo
   if (missing.length > 0) {
     res.status(503).json({
       ok: false,
-      error: "Server is not fully configured. Set these env vars and redeploy.",
-      missing
+      error: `Missing required environment variable(s): ${missing.join(", ")}. Add to Railway → Variables and redeploy.`,
+      missing,
+      fix: "Open the Railway service → Variables tab → add the variable(s) above → redeploy. See README for where to find each value."
     });
     return;
   }
