@@ -9,13 +9,14 @@ import { withRequestContext, type AuthMode } from "./request-context.js";
 import { TechnicianDb } from "./db.js";
 import { TechnicianStore } from "./technician-store.js";
 import { registerStatusDomain } from "./domains/status.js";
+import { registerLookupDomain } from "./domains/lookup.js";
 import { registerTicketsDomain } from "./domains/tickets.js";
 import { registerCustomersDomain } from "./domains/customers.js";
 import { registerDevicesDomain } from "./domains/devices.js";
 import { registerAlertsDomain } from "./domains/alerts.js";
 import type { DomainRegister } from "./domains/common.js";
 
-const SERVER_VERSION = "0.7.0";
+const SERVER_VERSION = "0.7.1";
 
 const config = loadConfig();
 const ninja = new NinjaClient(config);
@@ -27,13 +28,18 @@ const technicianStore = new TechnicianStore(config, technicianDb, ninja);
 // the connection.
 type SliceName = "tickets" | "customers" | "devices" | "alerts" | "full";
 
+// Lookup (find_organizations / find_org_by_domain / find_contact / etc.) is
+// included on EVERY slice — almost every workflow needs to resolve "the customer
+// the user mentioned by name" into an organization_id. Five small read-only
+// tools, cheap to ship everywhere.
 const SLICES: Record<SliceName, DomainRegister[]> = {
-  tickets: [registerStatusDomain, registerTicketsDomain],
-  customers: [registerStatusDomain, registerCustomersDomain],
-  devices: [registerStatusDomain, registerDevicesDomain],
-  alerts: [registerStatusDomain, registerAlertsDomain],
+  tickets: [registerStatusDomain, registerLookupDomain, registerTicketsDomain],
+  customers: [registerStatusDomain, registerLookupDomain, registerCustomersDomain],
+  devices: [registerStatusDomain, registerLookupDomain, registerDevicesDomain],
+  alerts: [registerStatusDomain, registerLookupDomain, registerAlertsDomain],
   full: [
     registerStatusDomain,
+    registerLookupDomain,
     registerTicketsDomain,
     registerCustomersDomain,
     registerDevicesDomain,
