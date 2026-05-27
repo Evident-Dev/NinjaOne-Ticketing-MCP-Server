@@ -12,7 +12,7 @@ import { registerDevicesDomain } from "./domains/devices.js";
 import { registerAlertsDomain } from "./domains/alerts.js";
 import type { DomainRegister } from "./domains/common.js";
 
-const SERVER_VERSION = "0.5.0";
+const SERVER_VERSION = "0.5.1";
 
 const config = loadConfig();
 const ninja = new NinjaClient(config);
