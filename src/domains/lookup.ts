@@ -1,20 +1,15 @@
-// Read-only org + contact lookups. Attached to every domain slice (tickets,
-// devices, alerts, customers) so any workflow that needs to resolve a customer
-// by name, email-domain, or contact has these tools available without forcing
-// the user to add a second MCP endpoint.
-//
-// Cheap by design: every tool here is a read-only API call against cached
-// data. Adding them to all slices doesn't meaningfully bloat tool-schema
-// tokens — five small lookup tools.
+// Read-only org + contact lookups. Attached to every domain slice so any
+// workflow that needs to resolve a customer can do so without forcing the user
+// to add a second MCP endpoint.
 
 import { z } from "zod";
 import { jsonResult, type DomainContext } from "./common.js";
 
 export function registerLookupDomain({ server, ninja }: DomainContext): void {
   server.registerTool(
-    "ninja_find_organizations",
+    "ninja_org_find",
     {
-      title: "Find Organizations",
+      title: "Org: Find",
       description:
         "Search organizations by name (fuzzy match). Returns matching org IDs and names. Use this FIRST when a user mentions a customer/client by name and you need the numeric organization_id (e.g. before creating a ticket). Read-only.",
       inputSchema: z.object({
@@ -33,9 +28,9 @@ export function registerLookupDomain({ server, ninja }: DomainContext): void {
   );
 
   server.registerTool(
-    "ninja_find_org_by_domain",
+    "ninja_org_find_by_domain",
     {
-      title: "Find Organization by Email Domain",
+      title: "Org: Find by Email Domain",
       description:
         "Look up an organization by an email domain (e.g. \"acme.com\"). Matched against contact emails registered in NinjaOne. Use this when you have a customer's email and need to identify which org they belong to. Accepts either a bare domain or a full email address — everything before @ is stripped.",
       inputSchema: z.object({
@@ -56,9 +51,9 @@ export function registerLookupDomain({ server, ninja }: DomainContext): void {
   );
 
   server.registerTool(
-    "ninja_get_organization",
+    "ninja_org_get",
     {
-      title: "Get Organization",
+      title: "Org: Get Details",
       description: "Retrieve full details for a single organization by ID — including locations and policies.",
       inputSchema: z.object({
         organization_id: z.coerce.number().int().positive()
@@ -69,9 +64,9 @@ export function registerLookupDomain({ server, ninja }: DomainContext): void {
   );
 
   server.registerTool(
-    "ninja_list_organization_locations",
+    "ninja_org_list_locations",
     {
-      title: "List Organization Locations",
+      title: "Org: List Locations",
       description: "List the locations (sites) belonging to an organization. Useful when a ticket needs a specific location_id.",
       inputSchema: z.object({
         organization_id: z.coerce.number().int().positive()
@@ -82,9 +77,9 @@ export function registerLookupDomain({ server, ninja }: DomainContext): void {
   );
 
   server.registerTool(
-    "ninja_find_contact",
+    "ninja_contact_find",
     {
-      title: "Find Contact",
+      title: "Contact: Find",
       description:
         "Search NinjaOne contacts by name or email. Returns each contact's UID (which can be passed as requester_uid on a ticket to skip the email lookup) and their organization_id. Use this when you know the requester's name/email and want to attach them to a ticket properly.",
       inputSchema: z.object({

@@ -1,14 +1,14 @@
-// Status/identity tools — registered on every MCP endpoint so you can always
-// check who you are and whether the connection is healthy.
+// System tools — server health, identity, and OAuth status. Registered on
+// every MCP endpoint so any connection can introspect itself.
 
 import { z } from "zod";
 import { jsonResult, type DomainContext } from "./common.js";
 
 export function registerStatusDomain({ server, ninja, config }: DomainContext): void {
   server.registerTool(
-    "ninja_status",
+    "ninja_system_status",
     {
-      title: "NinjaOne Connection Status",
+      title: "System: Connection Status",
       description: "Confirm the MCP server can reach NinjaOne and report region, scopes, and a small organization sample. Read-only.",
       inputSchema: z.object({}).strict(),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
@@ -27,31 +27,9 @@ export function registerStatusDomain({ server, ninja, config }: DomainContext): 
   );
 
   server.registerTool(
-    "ninja_auth_status",
+    "ninja_system_whoami",
     {
-      title: "NinjaOne User-Context Auth Status",
-      description:
-        "Check whether a user-context refresh token is on file (required for ticket writes, comments, and updates). Always returns the login_url. " +
-        "If `authenticated` is false, instruct the user to open `login_url` in a browser and sign in to NinjaOne, then retry their request.",
-      inputSchema: z.object({}).strict(),
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
-    },
-    async () => {
-      const status = await ninja.userOAuth.getStatus();
-      return jsonResult({
-        ...status,
-        login_url: ninja.userOAuth.loginUrl(),
-        message: status.authenticated
-          ? "User-context token is active. Ticket writes should work."
-          : "No user-context token on file. Ticket writes will fail. ASK THE USER to visit login_url in a browser to sign in once."
-      });
-    }
-  );
-
-  server.registerTool(
-    "ninja_whoami",
-    {
-      title: "NinjaOne Technician Identity",
+      title: "System: Technician Identity",
       description:
         "Return the technician whose name will appear on tickets and comments for the CURRENT connection. " +
         "Priority: explicit tool argument > per-tech URL token (NINJA_TECHNICIANS) > TECHNICIAN_EMAIL config. " +
@@ -79,6 +57,28 @@ export function registerStatusDomain({ server, ninja, config }: DomainContext): 
         display_name: profile.displayName,
         email: profile.email,
         ninja_user_id: profile.appUserId
+      });
+    }
+  );
+
+  server.registerTool(
+    "ninja_system_auth_status",
+    {
+      title: "System: NinjaOne User-OAuth Status",
+      description:
+        "Check whether a user-context refresh token is on file (required for ticket writes, comments, and updates). Always returns the login_url. " +
+        "If `authenticated` is false, instruct the user to open `login_url` in a browser and sign in to NinjaOne, then retry their request.",
+      inputSchema: z.object({}).strict(),
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+    },
+    async () => {
+      const status = await ninja.userOAuth.getStatus();
+      return jsonResult({
+        ...status,
+        login_url: ninja.userOAuth.loginUrl(),
+        message: status.authenticated
+          ? "User-context token is active. Ticket writes should work."
+          : "No user-context token on file. Ticket writes will fail. ASK THE USER to visit login_url in a browser to sign in once."
       });
     }
   );

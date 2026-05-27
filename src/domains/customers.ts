@@ -7,10 +7,10 @@ import { jsonResult, type DomainContext } from "./common.js";
 
 export function registerCustomersDomain({ server, ninja }: DomainContext): void {
   server.registerTool(
-    "ninja_create_organization",
+    "ninja_org_create",
     {
-      title: "Create Organization",
-      description: "Create a new customer organization in NinjaOne. Destructive — confirm with the user before calling.",
+      title: "Org: Create",
+      description: "Create a new customer organization in NinjaOne. Confirm with the user before calling.",
       inputSchema: z.object({
         name: z.string().min(2).max(100),
         description: z.string().max(1000).optional(),
