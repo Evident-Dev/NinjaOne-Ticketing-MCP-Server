@@ -447,22 +447,38 @@ export class NinjaClient {
       (fields.attributes && Object.keys(fields.attributes).length > 0);
 
     if (hasFieldUpdate) {
+      // NinjaOne's UpdateTicket DTO requires several fields as non-null
+      // (subject, requesterUid, clientId, ticketFormId — basically anything
+      // that's required on create). Partial updates fail unless we echo the
+      // current values back. Fetch the ticket, build a full payload, then
+      // overlay caller's changes.
       const current = await this.getTicket(ticket_id);
+      const currentStatusId =
+        typeof current.status === "object" && current.status !== null
+          ? String(current.status.statusId)
+          : current.status;
+
       const payload: Record<string, unknown> = {
-        subject: fields.summary ?? current.subject
+        subject: fields.summary ?? current.subject,
+        requesterUid: current.requesterUid,
+        clientId: current.clientId,
+        ticketFormId: current.ticketFormId,
+        status: fields.status !== undefined
+          ? await this.resolveStatus(fields.status)
+          : currentStatusId,
+        type: fields.type ?? current.type,
+        priority: fields.priority ?? current.priority,
+        severity: fields.severity ?? current.severity,
+        assignedAppUserId: fields.assigned_app_user_id ?? current.assignedAppUserId,
+        tags: fields.tags ?? current.tags ?? []
       };
-      if (fields.status !== undefined) {
-        payload.status = await this.resolveStatus(fields.status);
-      }
-      if (fields.type !== undefined) payload.type = fields.type;
-      if (fields.priority !== undefined) payload.priority = fields.priority;
-      if (fields.severity !== undefined) payload.severity = fields.severity;
-      if (fields.assigned_app_user_id !== undefined) {
-        payload.assignedAppUserId = fields.assigned_app_user_id;
-      }
-      if (fields.tags !== undefined) payload.tags = fields.tags;
       if (fields.attributes && Object.keys(fields.attributes).length > 0) {
         payload.attributes = fields.attributes;
+      }
+      // Strip null/undefined so we don't accidentally clear server-side values
+      // that we don't have a representation for.
+      for (const k of Object.keys(payload)) {
+        if (payload[k] === undefined || payload[k] === null) delete payload[k];
       }
       await this.request<unknown>(`/ticketing/ticket/${ticket_id}`, "PUT", payload);
     }
