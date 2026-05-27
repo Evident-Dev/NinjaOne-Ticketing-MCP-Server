@@ -14,9 +14,12 @@ import { registerTicketsDomain } from "./domains/tickets.js";
 import { registerCustomersDomain } from "./domains/customers.js";
 import { registerDevicesDomain } from "./domains/devices.js";
 import { registerAlertsDomain } from "./domains/alerts.js";
+import { registerBillingDomain } from "./domains/billing.js";
+import { registerVulnerabilitiesDomain } from "./domains/vulnerabilities.js";
+import { registerUsersDomain } from "./domains/users.js";
 import type { DomainRegister } from "./domains/common.js";
 
-const SERVER_VERSION = "0.8.0";
+const SERVER_VERSION = "0.9.0";
 
 const config = loadConfig();
 const ninja = new NinjaClient(config);
@@ -24,26 +27,76 @@ const technicianDb = config.databaseUrl ? new TechnicianDb(config.databaseUrl) :
 const technicianStore = new TechnicianStore(config, technicianDb, ninja);
 
 // Slice = the set of domain registers that get attached to an MCP endpoint.
-// Status tools are included in every slice so clients can always introspect
-// the connection.
-type SliceName = "tickets" | "customers" | "devices" | "alerts" | "full";
+// Status + lookup tools are included in every slice so clients can always
+// introspect and resolve a customer by name without changing endpoints.
+type SliceName =
+  | "tickets"
+  | "customers"
+  | "devices"
+  | "alerts"
+  | "billing"
+  | "security"
+  | "full";
 
-// Lookup (find_organizations / find_org_by_domain / find_contact / etc.) is
-// included on EVERY slice — almost every workflow needs to resolve "the customer
-// the user mentioned by name" into an organization_id. Five small read-only
-// tools, cheap to ship everywhere.
+// Each slice ships the Core Lookup Pack (status + org/contact find) PLUS
+// whatever cross-domain helpers the slice actually needs to do its job.
+// Cross-domain notes:
+//  - tickets: needs users (assignee lookup) and a thin device read
+//  - customers: needs devices ("what does this customer own") and billing read
+//  - devices: needs alerts ("what's wrong with this device")
+//  - alerts: needs devices ("what device fired this")
+//  - billing: needs tickets ("attach charge to ticket") and users
+//  - security: needs devices ("which machines are exposed")
 const SLICES: Record<SliceName, DomainRegister[]> = {
-  tickets: [registerStatusDomain, registerLookupDomain, registerTicketsDomain],
-  customers: [registerStatusDomain, registerLookupDomain, registerCustomersDomain],
-  devices: [registerStatusDomain, registerLookupDomain, registerDevicesDomain],
-  alerts: [registerStatusDomain, registerLookupDomain, registerAlertsDomain],
+  tickets: [
+    registerStatusDomain,
+    registerLookupDomain,
+    registerTicketsDomain,
+    registerUsersDomain,
+    registerDevicesDomain
+  ],
+  customers: [
+    registerStatusDomain,
+    registerLookupDomain,
+    registerCustomersDomain,
+    registerDevicesDomain,
+    registerBillingDomain
+  ],
+  devices: [
+    registerStatusDomain,
+    registerLookupDomain,
+    registerDevicesDomain,
+    registerAlertsDomain
+  ],
+  alerts: [
+    registerStatusDomain,
+    registerLookupDomain,
+    registerAlertsDomain,
+    registerDevicesDomain
+  ],
+  billing: [
+    registerStatusDomain,
+    registerLookupDomain,
+    registerBillingDomain,
+    registerTicketsDomain,
+    registerUsersDomain
+  ],
+  security: [
+    registerStatusDomain,
+    registerLookupDomain,
+    registerVulnerabilitiesDomain,
+    registerDevicesDomain
+  ],
   full: [
     registerStatusDomain,
     registerLookupDomain,
     registerTicketsDomain,
     registerCustomersDomain,
     registerDevicesDomain,
-    registerAlertsDomain
+    registerAlertsDomain,
+    registerBillingDomain,
+    registerVulnerabilitiesDomain,
+    registerUsersDomain
   ]
 };
 
@@ -73,7 +126,16 @@ app.get("/health", (_req: Request, res: Response) => {
     service: "ninja-ticket-mcp-server",
     version: SERVER_VERSION,
     region: config.ninjaRegion,
-    endpoints: ["/mcp", "/mcp/tickets", "/mcp/customers", "/mcp/devices", "/mcp/alerts"]
+    endpoints: [
+      "/mcp",
+      "/mcp/tickets",
+      "/mcp/customers",
+      "/mcp/devices",
+      "/mcp/alerts",
+      "/mcp/billing",
+      "/mcp/security"
+    ],
+    destructive_allowlist: [...config.destructiveAllowlist]
   });
 });
 
@@ -99,6 +161,8 @@ mountMcpEndpoint("/mcp/tickets", "tickets");
 mountMcpEndpoint("/mcp/customers", "customers");
 mountMcpEndpoint("/mcp/devices", "devices");
 mountMcpEndpoint("/mcp/alerts", "alerts");
+mountMcpEndpoint("/mcp/billing", "billing");
+mountMcpEndpoint("/mcp/security", "security");
 
 app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
   console.error("Request failed:", error);
@@ -123,7 +187,16 @@ app.listen(config.port, async () => {
   console.log(
     `NinjaOne MCP server v${SERVER_VERSION} listening on :${config.port} (region: ${config.ninjaRegion})`
   );
-  console.log(`Endpoints: /mcp, /mcp/tickets, /mcp/customers, /mcp/devices, /mcp/alerts`);
+  console.log(
+    `Endpoints: /mcp, /mcp/tickets, /mcp/customers, /mcp/devices, /mcp/alerts, /mcp/billing, /mcp/security`
+  );
+  if (config.destructiveAllowlist.size > 0) {
+    console.log(
+      `[guardrails] destructive capabilities enabled: ${[...config.destructiveAllowlist].join(", ")}`
+    );
+  } else {
+    console.log(`[guardrails] no destructive capabilities enabled (NINJA_ALLOW_DESTRUCTIVE empty)`);
+  }
 
   const missing = getMissingVars();
   if (missing.length > 0) {
@@ -151,7 +224,8 @@ app.listen(config.port, async () => {
   if (technicianDb) {
     try {
       await technicianDb.bootstrapSchema();
-      console.log("[tech-store] DB schema ready (table: technicians)");
+      console.log("[tech-store] DB schema ready (tables: technicians, audit_log)");
+      ninja.setAuditDb(technicianDb);
     } catch (err) {
       console.error("[tech-store] schema bootstrap FAILED:", (err as Error).message);
     }

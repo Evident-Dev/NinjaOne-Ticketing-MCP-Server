@@ -52,7 +52,66 @@ export class TechnicianDb {
       );
       CREATE INDEX IF NOT EXISTS idx_technicians_token ON technicians(token);
       CREATE INDEX IF NOT EXISTS idx_technicians_email ON technicians(email);
+
+      CREATE TABLE IF NOT EXISTS audit_log (
+        id              BIGSERIAL PRIMARY KEY,
+        ts              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        actor_email     TEXT,
+        actor_source    TEXT,
+        method          TEXT NOT NULL,
+        path            TEXT NOT NULL,
+        status_code     INTEGER,
+        result_code     TEXT,
+        payload_summary TEXT,
+        error_message   TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(ts DESC);
+      CREATE INDEX IF NOT EXISTS idx_audit_log_actor ON audit_log(actor_email);
     `);
+  }
+
+  async writeAudit(entry: {
+    actorEmail?: string;
+    actorSource?: string;
+    method: string;
+    path: string;
+    statusCode?: number;
+    resultCode?: string;
+    payloadSummary?: string;
+    errorMessage?: string;
+  }): Promise<void> {
+    try {
+      await this.pool.query(
+        `INSERT INTO audit_log
+           (actor_email, actor_source, method, path, status_code, result_code, payload_summary, error_message)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [
+          entry.actorEmail ?? null,
+          entry.actorSource ?? null,
+          entry.method,
+          entry.path,
+          entry.statusCode ?? null,
+          entry.resultCode ?? null,
+          entry.payloadSummary ?? null,
+          entry.errorMessage ?? null
+        ]
+      );
+    } catch (err) {
+      // Audit must never break the actual request.
+      console.warn("[audit] failed to record:", (err as Error).message);
+    }
+  }
+
+  async recentAudit(limit = 25): Promise<Array<Record<string, unknown>>> {
+    const res = await this.pool.query<Record<string, unknown>>(
+      `SELECT id, ts, actor_email, actor_source, method, path, status_code, result_code,
+              payload_summary, error_message
+       FROM audit_log
+       ORDER BY id DESC
+       LIMIT $1`,
+      [Math.min(Math.max(limit, 1), 200)]
+    );
+    return res.rows;
   }
 
   // Insert a row only if the ninja_user_id isn't already present. Returns true

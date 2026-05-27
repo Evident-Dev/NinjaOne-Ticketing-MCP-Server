@@ -2,7 +2,34 @@
 
 A Railway-hosted MCP server that gives Claude full access to NinjaOne — tickets, customers, devices, and alerts — via separate per-domain endpoints so Claude only loads the toolset it needs.
 
-**Version:** 0.7.0
+**Version:** 0.9.0
+
+## What changed in 0.9.0
+
+- **Two new endpoints.** `/mcp/billing` (contracts, invoices, products, ticket-products) and `/mcp/security` (vulnerability triage). See the endpoints table below.
+- **Billing domain.** Read contracts/invoices/products/customer-accounts, list ticket-products, and add billable time/products to a ticket — closes the time-tracking → invoice loop. New convenience tool `ninja_ticket_add_billable_time` for hours/minutes-based billing from the tickets endpoint.
+- **Vulnerability triage.** `ninja_vuln_list` (with org/severity filter), `ninja_vuln_get` by CVE, `ninja_vuln_list_for_device`.
+- **Device detail expanders.** `software`, `os_patches`, `disks`, `volumes`, `processors`, `services`, `last_logged_on_user` — everything you need to diagnose a machine from chat.
+- **Maintenance windows.** `ninja_device_set_maintenance` / `clear_maintenance` to suppress alerts during work.
+- **Technician lookup.** `ninja_user_list` and `ninja_user_find` so Claude can resolve "assign to <person>" → appUserId.
+- **Cross-domain helpers per endpoint.** `/mcp/tickets` now includes user + device lookup. `/mcp/customers` includes devices + billing. Each slice is self-sufficient — no endpoint-hopping for common workflows.
+- **Destructive-op guardrails.** Four-layer framework:
+  - **Allowlist (`NINJA_ALLOW_DESTRUCTIVE`).** Destructive tools whose capability key isn't in this CSV are not registered — Claude literally can't see them.
+  - **Confirm token.** `ninja_ticket_delete` / `ninja_device_delete` / `ninja_alert_reset_all` require the user to type `DELETE` / `RESET` themselves.
+  - **Dry-run.** Every gated tool accepts `dry_run: true` to preview the target + payload without acting.
+  - **Audit log.** A new Postgres `audit_log` table records every non-GET request (actor, method, path, status, result_code, payload summary). Queryable in Railway → Postgres → Data.
+- **Better error surfacing.** `NinjaApiError` parses `resultCode` + `errorMessage` from NinjaOne JSON bodies, so 4xx failures are debuggable from Claude.
+- **`/health` reports `destructive_allowlist`** so you can verify the env-var took effect without restarting Claude.
+
+Capability keys for `NINJA_ALLOW_DESTRUCTIVE`:
+- `ticket_delete` — recommended
+- `alert_reset_all` — recommended
+- `device_delete` — leave off unless you really need it
+
+## What changed in 0.8.0
+
+- **Tool naming convention.** Every tool renamed to `ninja_<resource>_<action>` for consistency and easier discovery (e.g. `ninja_create_ticket` → `ninja_ticket_create`, `ninja_list_alerts` → `ninja_alert_list`).
+- Tool descriptions tightened so Claude picks the right tool faster.
 
 ## What changed in 0.7.0
 
@@ -41,15 +68,19 @@ A Railway-hosted MCP server that gives Claude full access to NinjaOne — ticket
 
 Each endpoint is a separate MCP server. Add only the ones you want in Claude.
 
-| URL | Tools | Use for |
-|---|---|---|
-| `/mcp` | Everything below (≈22 tools) | Power users, scripted workflows |
-| `/mcp/tickets` | Create, get, update, close, comment, log, list-for-board, statuses, forms, boards, attributes (≈12) | Help-desk techs |
-| `/mcp/customers` | Find orgs, find by domain, get org, create org, list locations, find contact (≈6) | Account managers, ticket triage |
-| `/mcp/devices` | List, get, reboot, activity log (≈4) | Sysadmins, RMM work |
-| `/mcp/alerts` | List, summary by severity, reset (≈3) | NOC / monitoring |
+Each endpoint also ships the **Core Lookup Pack** (`ninja_system_status`, `ninja_system_whoami`, `ninja_system_auth_status`, `ninja_org_find`, `ninja_org_find_by_domain`, `ninja_org_get`, `ninja_org_list_locations`, `ninja_contact_find`) so any workflow can resolve "the customer the user mentioned by name" without changing endpoints.
 
-Every endpoint also exposes `ninja_status` (connection check) and `ninja_whoami` (technician identity).
+| URL | Domain-specific tools added | Cross-domain helpers included | Use for |
+|---|---|---|---|
+| `/mcp` | Everything | — | Power users, scripted workflows |
+| `/mcp/tickets` | Ticket CRUD + comment + resolve + add_billable_time + (gated) delete + list forms/boards/statuses/attributes | user lookup, device read | Help-desk techs |
+| `/mcp/customers` | Org create + locations | device list, billing read | Account managers, intake |
+| `/mcp/devices` | Get, list, reboot, activities, software, os_patches, disks, volumes, processors, services, last_logged_on_user, maintenance, (gated) delete | alert list | Sysadmins, RMM work |
+| `/mcp/alerts` | List, summary, reset, (gated) reset_all | device read | NOC / monitoring |
+| `/mcp/billing` | Agreements, invoices, products, customer accounts, ticket products, add_ticket_product | ticket read, user lookup | Finance, account managers |
+| `/mcp/security` | Vulnerabilities (list / get by CVE / by device) | device read | Security triage |
+
+Each slice is self-sufficient — a help-desk tech adding `/mcp/tickets` can also resolve a customer by name, find a device to attach, and pick an assignee, without needing the full `/mcp` surface.
 
 ---
 
@@ -128,6 +159,7 @@ If you're on a partner / whitelabel instance with its own hostname (e.g. `someth
    | `PUBLIC_BASE_URL` | Auto | Railway sets `RAILWAY_PUBLIC_DOMAIN` automatically once a domain is generated — we derive the base URL from it. Only set this manually if you need to override. |
    | `USER_TOKEN_PATH` | Default `/data/refresh-token.json` | Path inside the container where the refresh token is persisted. Must be inside a mounted volume. |
    | `NINJA_BASE_URL` | Only for whitelabel | Full base URL if not using a stock region |
+   | `NINJA_ALLOW_DESTRUCTIVE` | Optional | CSV of destructive-tool capability keys to enable. Empty = no destructive tools. Recommended: `ticket_delete,alert_reset_all`. Add `device_delete` only if you really need it. |
 
 6. Redeploy if Railway didn't automatically.
 
@@ -246,56 +278,89 @@ curl http://localhost:3000/debug/test-ninja
 
 ## Tool reference
 
-### Tickets (`/mcp/tickets`)
+> Tools follow the convention `ninja_<resource>_<action>` (since v0.8.0). Pre-0.8.0 names are gone.
+
+### Tickets
 
 | Tool | Purpose |
 |---|---|
-| `ninja_create_ticket` | Create a ticket. Org resolution via `organization_id`, `organization_name` (fuzzy), or `organization_domain`. Supports custom fields via `attributes`. |
-| `ninja_get_ticket` | Fetch a ticket by ID. |
-| `ninja_update_ticket` | Update any combination of subject/status/priority/severity/type/assignee/tags/attributes; optional `comment_body`. |
-| `ninja_close_ticket` | Convenience: set status to CLOSED, optionally with a final comment. |
-| `ninja_add_comment` | Public reply or internal note; optional `time_tracked` in seconds. |
-| `ninja_get_ticket_log` | Full comment + activity history. |
-| `ninja_list_tickets_for_board` | Tickets on a specific board. |
-| `ninja_list_ticket_forms` | Discover ticket forms. |
-| `ninja_list_ticket_boards` | Discover boards. |
-| `ninja_list_ticket_statuses` | Discover statuses + their IDs. |
-| `ninja_list_ticket_attributes` | Discover custom fields. |
+| `ninja_ticket_create` | Create a ticket. Org resolution via `organization_id`, `organization_name` (fuzzy), or `organization_domain`. Supports custom fields via `attributes`. |
+| `ninja_ticket_get` | Fetch a ticket by ID. |
+| `ninja_ticket_update` | Update any combination of subject/status/priority/severity/type/assignee/tags/attributes; optional `comment_body`. |
+| `ninja_ticket_resolve` | Convenience: set status to RESOLVED, optionally with a final comment. NinjaOne treats CLOSED as terminal-only — use RESOLVED. |
+| `ninja_ticket_add_comment` | Public reply or internal note; optional `time_tracked` in seconds. |
+| `ninja_ticket_add_billable_time` | Log billable time (hours or minutes) on a ticket — wraps `add_ticket_product`. |
+| `ninja_ticket_get_log` | Full comment + activity history. |
+| `ninja_ticket_list_for_board` | Tickets on a specific board. |
+| `ninja_ticket_list_forms` / `_boards` / `_statuses` / `_attributes` | Discover ticket metadata. |
+| `ninja_ticket_delete` *(gated by `ticket_delete`)* | Permanent delete with confirm token + dry-run. |
 
-### Customers (`/mcp/customers`)
-
-| Tool | Purpose |
-|---|---|
-| `ninja_find_organizations` | Fuzzy search by name. |
-| `ninja_find_org_by_domain` | Look up org from `acme.com` (or `user@acme.com`). |
-| `ninja_get_organization` | Org details by ID. |
-| `ninja_list_organization_locations` | Locations belonging to an org. |
-| `ninja_create_organization` | Create a new customer org. |
-| `ninja_find_contact` | Search contacts by name/email; returns UIDs needed as ticket requesters. |
-
-### Devices (`/mcp/devices`)
+### Customers
 
 | Tool | Purpose |
 |---|---|
-| `ninja_list_devices` | List devices; optional `organization_id` filter. |
-| `ninja_get_device` | Device details by ID. |
-| `ninja_device_activities` | Recent device activity log. |
-| `ninja_reboot_device` | Schedule reboot (`NORMAL` or `FORCED`). Destructive — Claude confirms first. |
+| `ninja_org_find` | Fuzzy search by name. |
+| `ninja_org_find_by_domain` | Look up org from `acme.com` (or `user@acme.com`). |
+| `ninja_org_get` | Org details by ID. |
+| `ninja_org_list_locations` | Locations belonging to an org. |
+| `ninja_org_create` | Create a new customer org. |
+| `ninja_contact_find` | Search contacts by name/email; returns UIDs needed as ticket requesters. |
 
-### Alerts (`/mcp/alerts`)
-
-| Tool | Purpose |
-|---|---|
-| `ninja_list_alerts` | All active alerts; optional `device_id` or `source_type`. |
-| `ninja_alerts_summary` | Count grouped by severity. |
-| `ninja_reset_alert` | Dismiss a single alert by UID. |
-
-### Always available
+### Devices
 
 | Tool | Purpose |
 |---|---|
-| `ninja_status` | Connection + region + scope check. |
-| `ninja_whoami` | Technician identity (from `TECHNICIAN_EMAIL`). |
+| `ninja_device_list` | List devices; optional `organization_id` filter. |
+| `ninja_device_get` | Device details by ID. |
+| `ninja_device_list_activities` | Recent device activity log. |
+| `ninja_device_list_software` / `_os_patches` / `_disks` / `_volumes` / `_processors` / `_services` | Inventory + diagnostics. |
+| `ninja_device_last_logged_on_user` | Most recent interactive login. |
+| `ninja_device_reboot` | Schedule reboot (`NORMAL` or `FORCED`). |
+| `ninja_device_set_maintenance` / `_clear_maintenance` | Suppress alerts during a work window. |
+| `ninja_device_delete` *(gated by `device_delete`)* | Permanent delete with confirm token + dry-run. |
+
+### Alerts
+
+| Tool | Purpose |
+|---|---|
+| `ninja_alert_list` | All active alerts; optional `device_id` or `source_type`. |
+| `ninja_alert_summary` | Count grouped by severity. |
+| `ninja_alert_reset` | Dismiss a single alert by UID. |
+| `ninja_alert_reset_all` *(gated by `alert_reset_all`)* | Bulk reset by source type, with confirm token + dry-run. |
+
+### Billing
+
+| Tool | Purpose |
+|---|---|
+| `ninja_billing_list_agreements` / `get_agreement` | Contracts. |
+| `ninja_billing_list_invoices` / `get_invoice` | Invoices. |
+| `ninja_billing_list_products` | Product catalogue (use IDs in `add_ticket_product`). |
+| `ninja_billing_list_customer_accounts` | Customer billing accounts. |
+| `ninja_billing_list_ticket_products` | Billable lines already attached to tickets. |
+| `ninja_billing_add_ticket_product` | Attach a billable product/charge to a ticket. |
+
+### Security / Vulnerabilities
+
+| Tool | Purpose |
+|---|---|
+| `ninja_vuln_list` | List vulnerabilities; optional org + severity filter. |
+| `ninja_vuln_get` | Get by CVE identifier. |
+| `ninja_vuln_list_for_device` | Per-device exposure. |
+
+### Users (technicians)
+
+| Tool | Purpose |
+|---|---|
+| `ninja_user_list` | Technicians (or include end users). |
+| `ninja_user_find` | Search by name/email; returns `appUserId` for ticket assignment. |
+
+### Always available (on every endpoint)
+
+| Tool | Purpose |
+|---|---|
+| `ninja_system_status` | Connection + region + scope check. |
+| `ninja_system_whoami` | Technician identity. |
+| `ninja_system_auth_status` | User-OAuth status + login URL. |
 
 ---
 
@@ -353,19 +418,25 @@ If your NinjaOne hostname isn't on the regional list, leave `NINJA_REGION` unset
 
 ```
 src/
-  index.ts          ← Express app, endpoint routing, boot banners
-  config.ts         ← env vars + region → URL derivation
-  types.ts          ← shared types
-  ninja.ts          ← NinjaClient (HTTP + dual auth + cache)
-  user-oauth.ts     ← Authorization Code + Refresh Token lifecycle
-  auth-routes.ts    ← /auth/login, /auth/callback, /auth/status
+  index.ts             ← Express app, endpoint routing, boot banners
+  config.ts            ← env vars + region → URL derivation + destructive allowlist
+  types.ts             ← shared types
+  ninja.ts             ← NinjaClient (HTTP + dual auth + cache + audit hook)
+  guardrails.ts        ← capability check, confirm-token + dry-run helpers
+  user-oauth.ts        ← Authorization Code + Refresh Token lifecycle
+  auth-routes.ts       ← /auth/login, /auth/callback, /auth/status
+  db.ts                ← Postgres: technicians + audit_log
   domains/
-    common.ts       ← DomainContext + jsonResult helper
-    status.ts       ← ninja_status, ninja_whoami, ninja_auth_status
-    tickets.ts      ← ticket tools
-    customers.ts    ← organization + contact tools
-    devices.ts      ← device tools
-    alerts.ts       ← alert tools
+    common.ts          ← DomainContext + jsonResult helper
+    status.ts          ← ninja_system_status, _whoami, _auth_status
+    lookup.ts          ← ninja_org_find, _find_by_domain, _get, _list_locations, ninja_contact_find
+    tickets.ts         ← ticket tools (+ gated delete + add_billable_time)
+    customers.ts       ← org create
+    devices.ts         ← device tools (+ detail expanders + maintenance + gated delete)
+    alerts.ts          ← alert tools (+ gated reset_all)
+    billing.ts         ← contracts, invoices, products, ticket products
+    vulnerabilities.ts ← CVE-based security triage
+    users.ts           ← technician lookup
 ```
 
 ---

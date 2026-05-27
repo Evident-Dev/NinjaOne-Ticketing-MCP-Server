@@ -39,6 +39,10 @@ export interface AppConfig {
   defaultTicketFormId?: number;
   defaultBoardId?: number;
   technicianEmail?: string;
+  // Capability allowlist for destructive tools. Comma-separated keys, e.g.
+  // "ticket_delete,device_delete,alert_reset_all". Tools whose key isn't here
+  // are NOT registered — the model can't see what it can't call.
+  destructiveAllowlist: Set<string>;
 }
 
 const REQUIRED = ["NINJA_CLIENT_ID", "NINJA_CLIENT_SECRET"] as const;
@@ -148,6 +152,17 @@ export function loadConfig(): AppConfig {
     databaseUrl: optional("DATABASE_URL") || undefined,
     defaultTicketFormId: optionalNumber("DEFAULT_TICKET_FORM_ID"),
     defaultBoardId: optionalNumber("DEFAULT_BOARD_ID"),
-    technicianEmail: process.env.TECHNICIAN_EMAIL?.trim() || undefined
+    technicianEmail: process.env.TECHNICIAN_EMAIL?.trim() || undefined,
+    destructiveAllowlist: parseAllowlist(optional("NINJA_ALLOW_DESTRUCTIVE"))
   };
+}
+
+function parseAllowlist(raw: string): Set<string> {
+  if (!raw) return new Set();
+  return new Set(
+    raw
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean)
+  );
 }

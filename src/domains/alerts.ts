@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { jsonResult, type DomainContext } from "./common.js";
+import { confirmField, dryRunField, dryRunPreview, isCapabilityAllowed } from "../guardrails.js";
 
-export function registerAlertsDomain({ server, ninja }: DomainContext): void {
+export function registerAlertsDomain({ server, ninja, config }: DomainContext): void {
   server.registerTool(
     "ninja_alert_list",
     {
@@ -55,4 +56,36 @@ export function registerAlertsDomain({ server, ninja }: DomainContext): void {
       return jsonResult({ reset: true, alert_uid });
     }
   );
+
+  // ── Destructive: gated by NINJA_ALLOW_DESTRUCTIVE=alert_reset_all ────────
+  if (isCapabilityAllowed(config, "alert_reset_all")) {
+    server.registerTool(
+      "ninja_alert_reset_all",
+      {
+        title: "Alert: RESET ALL by Source (bulk)",
+        description:
+          "Bulk-acknowledge every active alert of a given source type. POTENTIALLY DISRUPTIVE — alerts that were valid will reappear on next condition check, but staff lose the active-alert signal in between. Requires confirm=\"RESET\". Recommend dry_run=true first.",
+        inputSchema: z.object({
+          source_type: z.string().min(2).describe("Alert source type, e.g. CONDITION, PATCH, AV"),
+          confirm: confirmField("RESET", "bulk alert reset"),
+          dry_run: dryRunField
+        }).strict(),
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
+      },
+      async ({ source_type, dry_run }) => {
+        const matching = await ninja.listAlerts({ sourceType: source_type });
+        if (dry_run) {
+          return jsonResult(
+            dryRunPreview(`POST /alerts/${source_type}/reset`, { source_type }, {
+              source_type,
+              affected_count: matching.length,
+              sample_uids: matching.slice(0, 10).map((a) => a.uid)
+            })
+          );
+        }
+        await ninja.resetAlertsBySource(source_type);
+        return jsonResult({ reset_all: true, source_type, affected_count: matching.length });
+      }
+    );
+  }
 }
