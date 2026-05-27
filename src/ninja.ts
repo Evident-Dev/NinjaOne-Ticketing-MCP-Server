@@ -447,40 +447,7 @@ export class NinjaClient {
       (fields.attributes && Object.keys(fields.attributes).length > 0);
 
     if (hasFieldUpdate) {
-      // NinjaOne's UpdateTicket DTO requires several fields as non-null
-      // (subject, requesterUid, clientId, ticketFormId — basically anything
-      // that's required on create). Partial updates fail unless we echo the
-      // current values back. Fetch the ticket, build a full payload, then
-      // overlay caller's changes.
-      const current = await this.getTicket(ticket_id);
-      const currentStatusId =
-        typeof current.status === "object" && current.status !== null
-          ? String(current.status.statusId)
-          : current.status;
-
-      const payload: Record<string, unknown> = {
-        subject: fields.summary ?? current.subject,
-        requesterUid: current.requesterUid,
-        clientId: current.clientId,
-        ticketFormId: current.ticketFormId,
-        status: fields.status !== undefined
-          ? await this.resolveStatus(fields.status)
-          : currentStatusId,
-        type: fields.type ?? current.type,
-        priority: fields.priority ?? current.priority,
-        severity: fields.severity ?? current.severity,
-        assignedAppUserId: fields.assigned_app_user_id ?? current.assignedAppUserId,
-        tags: fields.tags ?? current.tags ?? []
-      };
-      if (fields.attributes && Object.keys(fields.attributes).length > 0) {
-        payload.attributes = fields.attributes;
-      }
-      // Strip null/undefined so we don't accidentally clear server-side values
-      // that we don't have a representation for.
-      for (const k of Object.keys(payload)) {
-        if (payload[k] === undefined || payload[k] === null) delete payload[k];
-      }
-      await this.request<unknown>(`/ticketing/ticket/${ticket_id}`, "PUT", payload);
+      await this.putTicketUpdate(ticket_id, fields, false);
     }
 
     if (comment_body) {
@@ -488,6 +455,59 @@ export class NinjaClient {
     }
 
     return this.getTicket(ticket_id);
+  }
+
+  // PUT /ticketing/ticket/{id} requires a full ticket-shaped payload AND a
+  // `version` field that matches the server's current version (optimistic
+  // concurrency). If something else updated the ticket between our GET and PUT
+  // (e.g. a comment we just added, server-side automation, another tech), we
+  // get ticket_updated_by_another_user. Re-fetch and retry once.
+  private async putTicketUpdate(
+    ticket_id: number,
+    fields: Omit<UpdateTicketInput, "ticket_id" | "comment_body" | "comment_public">,
+    isRetry: boolean
+  ): Promise<void> {
+    const current = await this.getTicket(ticket_id);
+    const currentStatusId =
+      typeof current.status === "object" && current.status !== null
+        ? String(current.status.statusId)
+        : current.status;
+
+    const payload: Record<string, unknown> = {
+      version: current.version,
+      subject: fields.summary ?? current.subject,
+      requesterUid: current.requesterUid,
+      clientId: current.clientId,
+      ticketFormId: current.ticketFormId,
+      status: fields.status !== undefined
+        ? await this.resolveStatus(fields.status)
+        : currentStatusId,
+      type: fields.type ?? current.type,
+      priority: fields.priority ?? current.priority,
+      severity: fields.severity ?? current.severity,
+      assignedAppUserId: fields.assigned_app_user_id ?? current.assignedAppUserId,
+      tags: fields.tags ?? current.tags ?? []
+    };
+    if (fields.attributes && Object.keys(fields.attributes).length > 0) {
+      payload.attributes = fields.attributes;
+    }
+    for (const k of Object.keys(payload)) {
+      if (payload[k] === undefined || payload[k] === null) delete payload[k];
+    }
+
+    try {
+      await this.request<unknown>(`/ticketing/ticket/${ticket_id}`, "PUT", payload);
+    } catch (err) {
+      if (
+        !isRetry &&
+        err instanceof NinjaApiError &&
+        err.resultCode === "ticket_updated_by_another_user"
+      ) {
+        // Stale version — re-fetch and retry once.
+        return this.putTicketUpdate(ticket_id, fields, true);
+      }
+      throw err;
+    }
   }
 
   // POST /ticketing/ticket/{ticketId}/comment is multipart/form-data with a
