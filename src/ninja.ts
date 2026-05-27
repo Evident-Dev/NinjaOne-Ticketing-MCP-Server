@@ -357,6 +357,25 @@ export class NinjaClient {
     return String(match.statusId);
   }
 
+  // Look up the tenant's default ticket form (the one with isDefault: true)
+  // and cache it. Used when no form_id is passed and DEFAULT_TICKET_FORM_ID
+  // isn't set (or points at a stale ID).
+  private cachedDefaultFormId?: number | null;
+  private async resolveDefaultFormId(): Promise<number | undefined> {
+    if (this.cachedDefaultFormId !== undefined) {
+      return this.cachedDefaultFormId ?? undefined;
+    }
+    try {
+      const forms = await this.listTicketForms();
+      const list = Array.isArray(forms) ? (forms as Array<Record<string, unknown>>) : [];
+      const def = list.find((f) => f.isDefault === true) ?? list[0];
+      this.cachedDefaultFormId = typeof def?.id === "number" ? def.id : null;
+    } catch {
+      this.cachedDefaultFormId = null;
+    }
+    return this.cachedDefaultFormId ?? undefined;
+  }
+
   // ── Tickets ───────────────────────────────────────────────────────────────
 
   async getTicket(ticketId: number): Promise<NinjaTicket> {
@@ -364,7 +383,10 @@ export class NinjaClient {
   }
 
   async createTicket(input: CreateTicketInput): Promise<NinjaTicket> {
-    const [clientId, requesterUid, technician, statusId] = await Promise.all([
+    // NinjaOne requires `status` and `ticketFormId` on every ticket-create. We
+    // default status to "NEW" (resolved to the tenant's NEW statusId) and
+    // ticketFormId to the tenant's default form if the caller didn't specify.
+    const [clientId, requesterUid, technician, statusId, defaultFormId] = await Promise.all([
       this.resolveClientId(input),
       input.requester_uid
         ? Promise.resolve(input.requester_uid)
@@ -372,10 +394,13 @@ export class NinjaClient {
           ? this.findContactByEmail(input.requester_email).then((c) => c?.uid)
           : Promise.resolve(undefined),
       this.getTechnicianProfile(),
-      this.resolveStatus(input.status)
+      this.resolveStatus(input.status ?? "NEW"),
+      input.form_id || this.config.defaultTicketFormId
+        ? Promise.resolve(undefined)
+        : this.resolveDefaultFormId()
     ]);
 
-    const ticketFormId = input.form_id ?? this.config.defaultTicketFormId;
+    const ticketFormId = input.form_id ?? this.config.defaultTicketFormId ?? defaultFormId;
 
     // NinjaOne ticket-create payload. `clientId` is the documented org field on
     // the ticket model. `description` is an object containing the first log
@@ -383,7 +408,8 @@ export class NinjaClient {
     const payload: Record<string, unknown> = {
       clientId,
       subject: input.summary,
-      description: { body: input.description, public: true }
+      description: { body: input.description, public: true },
+      status: statusId
     };
 
     if (ticketFormId) payload.ticketFormId = ticketFormId;
@@ -392,7 +418,6 @@ export class NinjaClient {
     if (input.type) payload.type = input.type;
     if (input.priority) payload.priority = input.priority;
     if (input.severity) payload.severity = input.severity;
-    if (statusId) payload.status = statusId;
     if (requesterUid) payload.requesterUid = requesterUid;
     if (input.tags?.length) payload.tags = input.tags;
     if (input.attributes && Object.keys(input.attributes).length > 0) {
@@ -408,19 +433,37 @@ export class NinjaClient {
   async updateTicket(input: UpdateTicketInput): Promise<NinjaTicket> {
     const { ticket_id, comment_body, comment_public, ...fields } = input;
 
-    const payload: Record<string, unknown> = {};
-    if (fields.summary !== undefined) payload.subject = fields.summary;
-    if (fields.status !== undefined) payload.status = await this.resolveStatus(fields.status);
-    if (fields.type !== undefined) payload.type = fields.type;
-    if (fields.priority !== undefined) payload.priority = fields.priority;
-    if (fields.severity !== undefined) payload.severity = fields.severity;
-    if (fields.assigned_app_user_id !== undefined) payload.assignedAppUserId = fields.assigned_app_user_id;
-    if (fields.tags !== undefined) payload.tags = fields.tags;
-    if (fields.attributes && Object.keys(fields.attributes).length > 0) {
-      payload.attributes = fields.attributes;
-    }
+    // NinjaOne's PUT /ticketing/ticket/{id} validates the body as a full
+    // ticket DTO — `subject` is non-nullable. Even a status-only change needs
+    // subject present, so we fetch the current ticket first and merge.
+    const hasFieldUpdate =
+      fields.summary !== undefined ||
+      fields.status !== undefined ||
+      fields.type !== undefined ||
+      fields.priority !== undefined ||
+      fields.severity !== undefined ||
+      fields.assigned_app_user_id !== undefined ||
+      fields.tags !== undefined ||
+      (fields.attributes && Object.keys(fields.attributes).length > 0);
 
-    if (Object.keys(payload).length > 0) {
+    if (hasFieldUpdate) {
+      const current = await this.getTicket(ticket_id);
+      const payload: Record<string, unknown> = {
+        subject: fields.summary ?? current.subject
+      };
+      if (fields.status !== undefined) {
+        payload.status = await this.resolveStatus(fields.status);
+      }
+      if (fields.type !== undefined) payload.type = fields.type;
+      if (fields.priority !== undefined) payload.priority = fields.priority;
+      if (fields.severity !== undefined) payload.severity = fields.severity;
+      if (fields.assigned_app_user_id !== undefined) {
+        payload.assignedAppUserId = fields.assigned_app_user_id;
+      }
+      if (fields.tags !== undefined) payload.tags = fields.tags;
+      if (fields.attributes && Object.keys(fields.attributes).length > 0) {
+        payload.attributes = fields.attributes;
+      }
       await this.request<unknown>(`/ticketing/ticket/${ticket_id}`, "PUT", payload);
     }
 
