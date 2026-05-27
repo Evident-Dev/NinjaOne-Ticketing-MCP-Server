@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { jsonResult, type DomainContext } from "./common.js";
+import { confirmField, dryRunField, dryRunPreview, isCapabilityAllowed } from "../guardrails.js";
 
-export function registerTicketsDomain({ server, ninja }: DomainContext): void {
+export function registerTicketsDomain({ server, ninja, config }: DomainContext): void {
   // ── Ticketing metadata ─────────────────────────────────────────────────────
 
   server.registerTool(
@@ -221,4 +222,81 @@ time_tracked is in seconds and is optional.`,
       return jsonResult({ commented: true, ticket });
     }
   );
+
+  // Convenience: add a billable line item (time or product) to a ticket.
+  // Mirrors ninja_billing_add_ticket_product — shipped here so help-desk techs
+  // working from /mcp/tickets don't need to swap endpoints.
+  server.registerTool(
+    "ninja_ticket_add_billable_time",
+    {
+      title: "Ticket: Add Billable Time",
+      description: `Log billable time on a ticket as a billing line item. Accepts hours (decimal) or minutes.
+
+Either pass product_id (the configured "Labor" or "Service" product) to use that product's rate, OR pass description + unit_price for a free-form charge.
+
+Examples:
+- 1.5h at the default labor rate: { ticket_id, product_id: 42, hours: 1.5 }
+- 45 minutes at $125/hr: { ticket_id, description: "Onsite triage", minutes: 45, unit_price: 125 }`,
+      inputSchema: z.object({
+        ticket_id: z.coerce.number().int().positive(),
+        product_id: z.coerce.number().int().positive().optional(),
+        description: z.string().min(1).max(500).optional(),
+        hours: z.number().positive().optional(),
+        minutes: z.number().positive().optional(),
+        unit_price: z.number().nonnegative().optional(),
+        notes: z.string().max(2000).optional()
+      }).strict().refine(
+        (v) => v.hours !== undefined || v.minutes !== undefined,
+        { message: "Provide either hours or minutes." }
+      ).refine(
+        (v) => v.product_id || (v.description && v.unit_price !== undefined),
+        { message: "Provide product_id, or description + unit_price." }
+      ),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
+    },
+    async (input) => {
+      const quantity = input.hours ?? (input.minutes ? input.minutes / 60 : 0);
+      const result = await ninja.createTicketProduct({
+        ticketId: input.ticket_id,
+        productId: input.product_id,
+        description: input.description,
+        quantity,
+        unitPrice: input.unit_price,
+        notes: input.notes
+      });
+      return jsonResult({ added: true, quantity_hours: quantity, ticket_product: result });
+    }
+  );
+
+  // ── Destructive: gated by NINJA_ALLOW_DESTRUCTIVE=ticket_delete ──────────
+  if (isCapabilityAllowed(config, "ticket_delete")) {
+    server.registerTool(
+      "ninja_ticket_delete",
+      {
+        title: "Ticket: DELETE (permanent)",
+        description:
+          "Permanently delete a ticket. IRREVERSIBLE — for normal workflow use ninja_ticket_resolve instead. Requires confirm=\"DELETE\". Recommend dry_run=true first.",
+        inputSchema: z.object({
+          ticket_id: z.coerce.number().int().positive(),
+          confirm: confirmField("DELETE", "permanent ticket removal"),
+          dry_run: dryRunField
+        }).strict(),
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
+      },
+      async ({ ticket_id, dry_run }) => {
+        const target = await ninja.getTicket(ticket_id);
+        if (dry_run) {
+          return jsonResult(
+            dryRunPreview(`DELETE /ticketing/ticket/${ticket_id}`, { ticket_id }, {
+              ticket_id,
+              subject: target.subject,
+              client_id: target.clientId
+            })
+          );
+        }
+        await ninja.deleteTicket(ticket_id);
+        return jsonResult({ deleted: true, ticket_id, deleted_ticket: target });
+      }
+    );
+  }
 }

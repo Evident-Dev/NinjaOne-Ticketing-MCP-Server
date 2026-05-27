@@ -1,5 +1,6 @@
 import type { AppConfig } from "./config.js";
-import { getRequestTechnicianEmail } from "./request-context.js";
+import type { TechnicianDb } from "./db.js";
+import { getCurrentRequestContext, getRequestTechnicianEmail } from "./request-context.js";
 import { UserOAuth, UserOAuthError } from "./user-oauth.js";
 import type {
   CreateTicketInput,
@@ -75,9 +76,16 @@ export class NinjaClient {
   // once per tech.
   private technicianProfileCache = new Map<string, TechnicianProfile | null>();
   readonly userOAuth: UserOAuth;
+  private auditDb: TechnicianDb | null = null;
 
   constructor(private readonly config: AppConfig) {
     this.userOAuth = new UserOAuth(config);
+  }
+
+  /** Wire the Postgres handle in once it's bootstrapped. Audit writes are
+   *  best-effort: if not set, non-GET calls aren't recorded. */
+  setAuditDb(db: TechnicianDb | null): void {
+    this.auditDb = db;
   }
 
   // ── Token management ─────────────────────────────────────────────────────
@@ -625,6 +633,155 @@ export class NinjaClient {
     await this.request<unknown>(`/alert/${alertUid}/reset`, "POST");
   }
 
+  // Bulk-reset alerts for a source type. Destructive — guardrail-gated at the
+  // tool layer.
+  async resetAlertsBySource(sourceType: string): Promise<void> {
+    await this.request<unknown>(`/alerts/${encodeURIComponent(sourceType)}/reset`, "POST");
+  }
+
+  // ── Device detail (Tier 1 expanders) ─────────────────────────────────────
+
+  async getDeviceSoftware(deviceId: number): Promise<unknown> {
+    return this.request<unknown>(`/device/${deviceId}/software`, "GET");
+  }
+
+  async getDeviceOsPatches(deviceId: number): Promise<unknown> {
+    return this.request<unknown>(`/device/${deviceId}/os-patches`, "GET");
+  }
+
+  async getDeviceDisks(deviceId: number): Promise<unknown> {
+    return this.request<unknown>(`/device/${deviceId}/disks`, "GET");
+  }
+
+  async getDeviceVolumes(deviceId: number): Promise<unknown> {
+    return this.request<unknown>(`/device/${deviceId}/volumes`, "GET");
+  }
+
+  async getDeviceProcessors(deviceId: number): Promise<unknown> {
+    return this.request<unknown>(`/device/${deviceId}/processors`, "GET");
+  }
+
+  async getDeviceServices(deviceId: number): Promise<unknown> {
+    return this.request<unknown>(`/device/${deviceId}/windows-services`, "GET");
+  }
+
+  async getDeviceLastLoggedOnUser(deviceId: number): Promise<unknown> {
+    return this.request<unknown>(`/device/${deviceId}/last-logged-on-user`, "GET");
+  }
+
+  // ── Device writes ────────────────────────────────────────────────────────
+
+  async setDeviceMaintenance(
+    deviceId: number,
+    input: { disabledFeatures: string[]; start?: number; end: number }
+  ): Promise<void> {
+    await this.request<unknown>(`/device/${deviceId}/maintenance`, "PUT", input);
+  }
+
+  async clearDeviceMaintenance(deviceId: number): Promise<void> {
+    await this.request<unknown>(`/device/${deviceId}/maintenance`, "DELETE");
+  }
+
+  /** Destructive — gated at the tool layer. */
+  async deleteDevice(deviceId: number): Promise<void> {
+    await this.request<unknown>(`/device/${deviceId}`, "DELETE");
+  }
+
+  // ── Ticket destructive ───────────────────────────────────────────────────
+
+  /** Destructive — gated at the tool layer. */
+  async deleteTicket(ticketId: number): Promise<void> {
+    await this.request<unknown>(`/ticketing/ticket/${ticketId}`, "DELETE");
+  }
+
+  // ── Users (technician listing) ───────────────────────────────────────────
+
+  async listAllUsers(opts: { userType?: "TECHNICIAN" | "END_USER" } = {}): Promise<NinjaUser[]> {
+    const path = opts.userType ? `/users?userType=${opts.userType}` : "/users";
+    const data = await this.request<unknown>(path, "GET");
+    return Array.isArray(data) ? (data as unknown[]).filter(isUser) : [];
+  }
+
+  // ── Billing ───────────────────────────────────────────────────────────────
+
+  async listAgreements(orgId?: number): Promise<unknown> {
+    const qs = orgId ? `?clientId=${orgId}` : "";
+    return this.request<unknown>(`/billing/agreements${qs}`, "GET");
+  }
+
+  async getAgreement(agreementId: number): Promise<unknown> {
+    return this.request<unknown>(`/billing/agreement/${agreementId}`, "GET");
+  }
+
+  async listInvoices(opts: { organizationId?: number; status?: string } = {}): Promise<unknown> {
+    const params = new URLSearchParams();
+    if (opts.organizationId) params.set("clientId", String(opts.organizationId));
+    if (opts.status) params.set("status", opts.status);
+    const qs = params.toString();
+    return this.request<unknown>(`/billing/invoices${qs ? `?${qs}` : ""}`, "GET");
+  }
+
+  async getInvoice(invoiceId: number): Promise<unknown> {
+    return this.request<unknown>(`/billing/invoice/${invoiceId}`, "GET");
+  }
+
+  async listBillingProducts(): Promise<unknown> {
+    return this.request<unknown>(`/billing/products`, "GET");
+  }
+
+  async listCustomerAccounts(): Promise<unknown> {
+    return this.request<unknown>(`/billing/customer-accounts`, "GET");
+  }
+
+  async listTicketProducts(ticketId?: number): Promise<unknown> {
+    const qs = ticketId ? `?ticketId=${ticketId}` : "";
+    return this.request<unknown>(`/billing/ticket-products${qs}`, "GET");
+  }
+
+  async createTicketProduct(input: {
+    ticketId: number;
+    productId?: number;
+    description?: string;
+    quantity?: number;
+    unitPrice?: number;
+    discountAmount?: number;
+    discountPercent?: number;
+    notes?: string;
+  }): Promise<unknown> {
+    const payload: Record<string, unknown> = { ticketId: input.ticketId };
+    if (input.productId !== undefined) payload.productId = input.productId;
+    if (input.description !== undefined) payload.description = input.description;
+    if (input.quantity !== undefined) payload.quantity = input.quantity;
+    if (input.unitPrice !== undefined) payload.unitPrice = input.unitPrice;
+    if (input.discountAmount !== undefined) payload.discountAmount = input.discountAmount;
+    if (input.discountPercent !== undefined) payload.discountPercent = input.discountPercent;
+    if (input.notes !== undefined) payload.notes = input.notes;
+    return this.request<unknown>(`/billing/ticket-product`, "POST", payload);
+  }
+
+  // ── Vulnerability management ─────────────────────────────────────────────
+
+  async listVulnerabilities(opts: {
+    organizationId?: number;
+    severity?: string;
+    pageSize?: number;
+  } = {}): Promise<unknown> {
+    const params = new URLSearchParams();
+    if (opts.organizationId) params.set("clientId", String(opts.organizationId));
+    if (opts.severity) params.set("severity", opts.severity);
+    if (opts.pageSize) params.set("pageSize", String(opts.pageSize));
+    const qs = params.toString();
+    return this.request<unknown>(`/vulnerabilities${qs ? `?${qs}` : ""}`, "GET");
+  }
+
+  async getVulnerability(cve: string): Promise<unknown> {
+    return this.request<unknown>(`/vulnerability/${encodeURIComponent(cve)}`, "GET");
+  }
+
+  async listDeviceVulnerabilities(deviceId: number): Promise<unknown> {
+    return this.request<unknown>(`/device/${deviceId}/vulnerabilities`, "GET");
+  }
+
   // ── Private ───────────────────────────────────────────────────────────────
 
   private async resolveClientId(input: CreateTicketInput): Promise<number> {
@@ -707,16 +864,50 @@ export class NinjaClient {
       if (/user_context_required/i.test(text)) {
         return this.requestWithRetry<T>(path, method, body, true, true);
       }
+      this.recordAudit(method, path, body, response.status, undefined, text);
       throw new NinjaApiError(method, path, response.status, text);
     }
 
     if (!response.ok) {
       const text = await safeText(response);
-      throw new NinjaApiError(method, path, response.status, text);
+      const err = new NinjaApiError(method, path, response.status, text);
+      this.recordAudit(method, path, body, response.status, err.resultCode, err.errorMessage ?? text);
+      throw err;
     }
 
+    this.recordAudit(method, path, body, response.status);
     if (response.status === 204) return undefined as T;
     return (await response.json()) as T;
+  }
+
+  /** Best-effort audit log. Skips GETs entirely; never throws. */
+  private recordAudit(
+    method: string,
+    path: string,
+    body: unknown,
+    statusCode?: number,
+    resultCode?: string,
+    errorMessage?: string
+  ): void {
+    if (method === "GET") return;
+    if (!this.auditDb) return;
+    const ctx = getCurrentRequestContext();
+    const actor =
+      ctx?.auth.kind === "technician"
+        ? { email: ctx.auth.email, source: "technician-token" }
+        : ctx?.auth.kind === "shared-secret"
+          ? { email: undefined, source: "shared-secret" }
+          : { email: undefined, source: "open" };
+    void this.auditDb.writeAudit({
+      actorEmail: actor.email,
+      actorSource: actor.source,
+      method,
+      path,
+      statusCode,
+      resultCode,
+      payloadSummary: summarizePayload(body),
+      errorMessage
+    });
   }
 
   private async requestMultipart(path: string, form: FormData): Promise<void> {
@@ -741,8 +932,21 @@ export class NinjaClient {
 
     if (!response.ok) {
       const text = await safeText(response);
-      throw new NinjaApiError("POST", path, response.status, text);
+      const err = new NinjaApiError("POST", path, response.status, text);
+      this.recordAudit("POST", path, "<multipart>", response.status, err.resultCode, err.errorMessage ?? text);
+      throw err;
     }
+    this.recordAudit("POST", path, "<multipart>", response.status);
+  }
+}
+
+function summarizePayload(body: unknown): string | undefined {
+  if (body === undefined || body === null) return undefined;
+  if (typeof body === "string") return body.slice(0, 500);
+  try {
+    return JSON.stringify(body).slice(0, 500);
+  } catch {
+    return "<unserializable>";
   }
 }
 
