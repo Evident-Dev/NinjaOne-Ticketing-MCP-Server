@@ -169,23 +169,29 @@ A comment can be attached in the same call via comment_body.`,
   server.registerTool(
     "ninja_close_ticket",
     {
-      title: "Close Ticket",
-      description: "Convenience: set a ticket's status to CLOSED. Optionally include a final comment.",
+      title: "Resolve Ticket",
+      description:
+        "Convenience: set a ticket's status to RESOLVED (the standard 'done' state). NinjaOne treats CLOSED as a terminal archive state reached automatically from RESOLVED after a delay or via system rules — direct close is rejected. Optionally include a final comment.",
       inputSchema: z.object({
         ticket_id: z.coerce.number().int().positive(),
         comment_body: z.string().min(1).optional(),
-        comment_public: z.boolean().optional().default(true)
+        comment_public: z.boolean().optional().default(true),
+        status: z
+          .enum(["RESOLVED", "CLOSED"])
+          .optional()
+          .default("RESOLVED")
+          .describe("Target status. Defaults to RESOLVED — only override if your tenant allows direct CLOSED transitions.")
       }).strict(),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true }
     },
-    async ({ ticket_id, comment_body, comment_public }) => {
+    async ({ ticket_id, comment_body, comment_public, status }) => {
       const ticket = await ninja.updateTicket({
         ticket_id,
-        status: "CLOSED",
+        status,
         comment_body,
         comment_public
       });
-      return jsonResult({ closed: true, ticket });
+      return jsonResult({ resolved: true, status, ticket });
     }
   );
 
