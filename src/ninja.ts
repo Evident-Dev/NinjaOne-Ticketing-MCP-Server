@@ -1,4 +1,5 @@
 import type { AppConfig } from "./config.js";
+import { UserOAuth, UserOAuthError } from "./user-oauth.js";
 import type {
   CreateTicketInput,
   NinjaAlert,
@@ -64,38 +65,84 @@ export class NinjaApiError extends Error {
 }
 
 export class NinjaClient {
-  private token?: CachedToken;
-  private tokenPromise?: Promise<CachedToken>;
+  private machineToken?: CachedToken;
+  private machineTokenPromise?: Promise<CachedToken>;
   private orgCache?: CachedList<NinjaOrganization>;
   private contactCache?: CachedList<NinjaContact>;
   private statusCache?: CachedList<TicketStatusRecord>;
   private technicianProfile?: TechnicianProfile | null;
+  readonly userOAuth: UserOAuth;
 
-  constructor(private readonly config: AppConfig) {}
+  constructor(private readonly config: AppConfig) {
+    this.userOAuth = new UserOAuth(config);
+  }
 
   // ── Token management ─────────────────────────────────────────────────────
+  //
+  // Two flows:
+  //  - User-context (Authorization Code + Refresh Token): required for ticket
+  //    writes (NinjaOne returns 403 user_context_required otherwise).
+  //  - Machine (Client Credentials): fine for reads. Faster, no login needed.
+  //
+  // Strategy per request:
+  //  - If a user token is available, prefer it (it works for everything).
+  //  - For write requests with no user token, throw a "login required" error
+  //    with the login URL embedded — Claude surfaces this to the user.
+  //  - For read requests with no user token, fall back to client_credentials.
 
-  private async getAccessToken(): Promise<string> {
-    const now = Date.now();
-    if (this.token && this.token.expiresAtMs > now + TOKEN_REFRESH_BUFFER_MS) {
-      return this.token.accessToken;
+  private async getAccessToken(requireUserContext: boolean): Promise<string> {
+    // User-context token takes precedence whenever it's available.
+    if (await this.userOAuth.isAuthenticated()) {
+      try {
+        return await this.userOAuth.getAccessToken();
+      } catch (err) {
+        if (err instanceof UserOAuthError && err.kind === "refresh-failed") {
+          // The refresh token expired/was revoked. For writes we MUST surface
+          // this — there's no fallback. For reads we silently degrade to M2M.
+          if (requireUserContext) throw err;
+          console.warn(
+            `[ninja] user-token refresh failed, falling back to client_credentials for this read: ${err.message}`
+          );
+        } else {
+          throw err;
+        }
+      }
+    } else if (requireUserContext) {
+      throw new UserOAuthError(
+        `NinjaOne ticket-write operations require a one-time browser login. ` +
+          this.userOAuth.loginInstructions(),
+        "no-token",
+        this.userOAuth.loginUrl()
+      );
     }
-    // Dedupe concurrent acquisitions.
-    if (!this.tokenPromise) {
-      this.tokenPromise = this.acquireToken().finally(() => {
-        this.tokenPromise = undefined;
+
+    // Machine token path (reads only).
+    const now = Date.now();
+    if (this.machineToken && this.machineToken.expiresAtMs > now + TOKEN_REFRESH_BUFFER_MS) {
+      return this.machineToken.accessToken;
+    }
+    if (!this.machineTokenPromise) {
+      this.machineTokenPromise = this.acquireMachineToken().finally(() => {
+        this.machineTokenPromise = undefined;
       });
     }
-    const fresh = await this.tokenPromise;
+    const fresh = await this.machineTokenPromise;
     return fresh.accessToken;
   }
 
-  private async acquireToken(): Promise<CachedToken> {
+  private async acquireMachineToken(): Promise<CachedToken> {
+    // Client Credentials grant — note the scope. NinjaOne accepts at minimum
+    // monitoring + management here. offline_access is meaningless for M2M.
+    const machineScope = this.config.oauthScope
+      .split(/\s+/)
+      .filter((s) => s && s !== "offline_access")
+      .join(" ") || "monitoring management";
+
     const body = new URLSearchParams({
       grant_type: "client_credentials",
       client_id: this.config.ninjaClientId,
       client_secret: this.config.ninjaClientSecret,
-      scope: this.config.oauthScope
+      scope: machineScope
     });
 
     const response = await fetch(this.config.ninjaTokenUrl, {
@@ -110,7 +157,8 @@ export class NinjaClient {
     if (!response.ok) {
       const text = await safeText(response);
       throw new Error(
-        `NinjaOne token request failed (${response.status}). Check NINJA_CLIENT_ID/SECRET, NINJA_REGION, and that 'Client Credentials' is an allowed grant on the API app. Body: ${text}`
+        `NinjaOne client_credentials request failed (${response.status}). ` +
+          `Check NINJA_CLIENT_ID/SECRET, NINJA_REGION, and that 'Client Credentials' is enabled on the API app. Body: ${text}`
       );
     }
 
@@ -119,15 +167,16 @@ export class NinjaClient {
       throw new Error("NinjaOne token response did not include access_token.");
     }
     const expiresInSeconds = data.expires_in ?? 3600;
-    this.token = {
+    this.machineToken = {
       accessToken: data.access_token,
       expiresAtMs: Date.now() + expiresInSeconds * 1000
     };
-    return this.token;
+    return this.machineToken;
   }
 
   invalidateToken(): void {
-    this.token = undefined;
+    this.machineToken = undefined;
+    this.userOAuth.invalidateAccessToken();
   }
 
   // ── Smoke test ────────────────────────────────────────────────────────────
@@ -491,17 +540,24 @@ export class NinjaClient {
     throw new Error("Provide organization_id, organization_name, or organization_domain.");
   }
 
-  async request<T>(path: string, method: "GET" | "POST" | "PUT" | "DELETE", body?: unknown): Promise<T> {
-    return this.requestWithRetry<T>(path, method, body, false);
+  async request<T>(
+    path: string,
+    method: "GET" | "POST" | "PUT" | "DELETE",
+    body?: unknown
+  ): Promise<T> {
+    // Writes require user-context; reads can use either.
+    const requireUserContext = method !== "GET";
+    return this.requestWithRetry<T>(path, method, body, requireUserContext, false);
   }
 
   private async requestWithRetry<T>(
     path: string,
     method: "GET" | "POST" | "PUT" | "DELETE",
     body: unknown,
+    requireUserContext: boolean,
     isRetry: boolean
   ): Promise<T> {
-    const token = await this.getAccessToken();
+    const token = await this.getAccessToken(requireUserContext);
     const url = `${this.config.ninjaApiBaseUrl}${path}`;
 
     const response = await fetch(url, {
@@ -516,7 +572,21 @@ export class NinjaClient {
 
     if (response.status === 401 && !isRetry) {
       this.invalidateToken();
-      return this.requestWithRetry<T>(path, method, body, true);
+      return this.requestWithRetry<T>(path, method, body, requireUserContext, true);
+    }
+
+    // 403 user_context_required during a read — we tried client_credentials
+    // for an endpoint that secretly needs user context. Re-try as a write.
+    if (
+      response.status === 403 &&
+      !requireUserContext &&
+      !isRetry
+    ) {
+      const text = await safeText(response);
+      if (/user_context_required/i.test(text)) {
+        return this.requestWithRetry<T>(path, method, body, true, true);
+      }
+      throw new NinjaApiError(method, path, response.status, text);
     }
 
     if (!response.ok) {
@@ -533,7 +603,8 @@ export class NinjaClient {
   }
 
   private async requestMultipartWithRetry(path: string, form: FormData, isRetry: boolean): Promise<void> {
-    const token = await this.getAccessToken();
+    // Comments are writes — always require user-context.
+    const token = await this.getAccessToken(true);
     const url = `${this.config.ninjaApiBaseUrl}${path}`;
 
     const response = await fetch(url, {

@@ -27,6 +27,28 @@ export function registerStatusDomain({ server, ninja, config }: DomainContext): 
   );
 
   server.registerTool(
+    "ninja_auth_status",
+    {
+      title: "NinjaOne User-Context Auth Status",
+      description:
+        "Check whether a user-context refresh token is on file (required for ticket writes, comments, and updates). Always returns the login_url. " +
+        "If `authenticated` is false, instruct the user to open `login_url` in a browser and sign in to NinjaOne, then retry their request.",
+      inputSchema: z.object({}).strict(),
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+    },
+    async () => {
+      const status = await ninja.userOAuth.getStatus();
+      return jsonResult({
+        ...status,
+        login_url: ninja.userOAuth.loginUrl(),
+        message: status.authenticated
+          ? "User-context token is active. Ticket writes should work."
+          : "No user-context token on file. Ticket writes will fail. ASK THE USER to visit login_url in a browser to sign in once."
+      });
+    }
+  );
+
+  server.registerTool(
     "ninja_whoami",
     {
       title: "NinjaOne Technician Identity",

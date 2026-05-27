@@ -18,11 +18,15 @@ export interface AppConfig {
   port: number;
   ninjaRegion: NinjaRegion;
   ninjaBaseUrl: string;     // e.g. https://app.ninjarmm.com
-  ninjaTokenUrl: string;    // e.g. https://app.ninjarmm.com/oauth/token (or instance URL)
+  ninjaTokenUrl: string;    // e.g. https://app.ninjarmm.com/ws/oauth/token (or instance URL)
+  ninjaAuthorizeUrl: string;// e.g. https://app.ninjarmm.com/ws/oauth/authorize
   ninjaApiBaseUrl: string;  // e.g. https://app.ninjarmm.com/api/v2 (or instance URL)
   ninjaClientId: string;
   ninjaClientSecret: string;
   oauthScope: string;
+  publicBaseUrl?: string;   // public URL of this MCP server, used to build /auth/callback
+  oauthRedirectUri?: string;
+  userTokenPath: string;    // where the refresh token is persisted on disk
   mcpSharedSecret?: string;
   defaultTicketFormId?: number;
   defaultBoardId?: number;
@@ -69,16 +73,33 @@ export function loadConfig(): AppConfig {
     stripTrailingSlash(optional("NINJA_API_BASE_URL")) || `${ninjaBaseUrl}/api/v2`;
   const ninjaTokenUrl =
     stripTrailingSlash(optional("NINJA_TOKEN_URL")) || `${ninjaBaseUrl}/ws/oauth/token`;
+  const ninjaAuthorizeUrl =
+    stripTrailingSlash(optional("NINJA_AUTHORIZE_URL")) || `${ninjaBaseUrl}/ws/oauth/authorize`;
+
+  // Railway exposes RAILWAY_PUBLIC_DOMAIN automatically once a domain is generated.
+  const railwayDomain = optional("RAILWAY_PUBLIC_DOMAIN");
+  const publicBase =
+    stripTrailingSlash(optional("PUBLIC_BASE_URL")) ||
+    (railwayDomain ? `https://${railwayDomain}` : "");
+  const explicitRedirect = optional("OAUTH_REDIRECT_URI");
+  const oauthRedirectUri = explicitRedirect || (publicBase ? `${publicBase}/auth/callback` : "");
 
   return {
     port: Number(process.env.PORT || 3000),
     ninjaRegion,
     ninjaBaseUrl,
     ninjaTokenUrl,
+    ninjaAuthorizeUrl,
     ninjaApiBaseUrl,
     ninjaClientId: optional("NINJA_CLIENT_ID"),
     ninjaClientSecret: optional("NINJA_CLIENT_SECRET"),
-    oauthScope: optional("OAUTH_SCOPE") || "monitoring management",
+    // offline_access is REQUIRED to receive a refresh_token from NinjaOne.
+    // Without it, every browser sign-in produces only a short-lived access token
+    // and the user has to re-authorize constantly.
+    oauthScope: optional("OAUTH_SCOPE") || "monitoring management offline_access",
+    publicBaseUrl: publicBase || undefined,
+    oauthRedirectUri: oauthRedirectUri || undefined,
+    userTokenPath: optional("USER_TOKEN_PATH") || "/data/refresh-token.json",
     mcpSharedSecret: process.env.MCP_SHARED_SECRET?.trim() || undefined,
     defaultTicketFormId: optionalNumber("DEFAULT_TICKET_FORM_ID"),
     defaultBoardId: optionalNumber("DEFAULT_BOARD_ID"),
