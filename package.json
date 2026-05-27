@@ -1,6 +1,6 @@
 {
   "name": "ninja-ticket-mcp-server",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Railway-hosted MCP server for NinjaOne — tickets, customers, devices, alerts. Splittable into per-domain endpoints to save Claude tool-schema tokens.",
   "type": "module",
   "main": "dist/index.js",
@@ -15,11 +15,13 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "express": "^5.1.0",
+    "pg": "^8.21.0",
     "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/express": "^5.0.3",
     "@types/node": "^24.0.0",
+    "@types/pg": "^8.20.0",
     "tsx": "^4.20.3",
     "typescript": "^5.8.3"
   }

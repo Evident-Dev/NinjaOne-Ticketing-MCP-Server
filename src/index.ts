@@ -6,6 +6,8 @@ import { NinjaApiError, NinjaClient } from "./ninja.js";
 import { buildAuthRoutes } from "./auth-routes.js";
 import { UserOAuthError } from "./user-oauth.js";
 import { withRequestContext, type AuthMode } from "./request-context.js";
+import { TechnicianDb } from "./db.js";
+import { TechnicianStore } from "./technician-store.js";
 import { registerStatusDomain } from "./domains/status.js";
 import { registerTicketsDomain } from "./domains/tickets.js";
 import { registerCustomersDomain } from "./domains/customers.js";
@@ -13,10 +15,12 @@ import { registerDevicesDomain } from "./domains/devices.js";
 import { registerAlertsDomain } from "./domains/alerts.js";
 import type { DomainRegister } from "./domains/common.js";
 
-const SERVER_VERSION = "0.6.0";
+const SERVER_VERSION = "0.7.0";
 
 const config = loadConfig();
 const ninja = new NinjaClient(config);
+const technicianDb = config.databaseUrl ? new TechnicianDb(config.databaseUrl) : null;
+const technicianStore = new TechnicianStore(config, technicianDb, ninja);
 
 // Slice = the set of domain registers that get attached to an MCP endpoint.
 // Status tools are included in every slice so clients can always introspect
@@ -132,15 +136,41 @@ app.listen(config.port, async () => {
     return;
   }
 
-  if (!config.mcpSharedSecret && config.technicians.length === 0) {
+  // Bootstrap the technician store. In DB mode this:
+  //   - opens the Postgres connection (DATABASE_URL)
+  //   - runs CREATE TABLE IF NOT EXISTS
+  //   - syncs from NinjaOne /users → DB (new techs get auto-generated tokens)
+  //   - loads all tokens into the in-memory cache for fast auth
+  //   - starts the 15-minute periodic re-sync
+  if (technicianDb) {
+    try {
+      await technicianDb.bootstrapSchema();
+      console.log("[tech-store] DB schema ready (table: technicians)");
+    } catch (err) {
+      console.error("[tech-store] schema bootstrap FAILED:", (err as Error).message);
+    }
+  }
+  try {
+    const result = await technicianStore.initialize();
+    if (result.source === "db") {
+      console.log(
+        `[tech-store] DB mode: ${result.total} technician(s) registered, ${result.inserted} new`
+      );
+      if (result.inserted > 0) {
+        console.log("[tech-store] view the new tokens in Railway → Postgres → Data → technicians");
+      }
+    } else if (result.source === "env") {
+      console.log(`[tech-store] env-var mode: ${result.total} technician(s) registered`);
+    }
+  } catch (err) {
+    console.error("[tech-store] initialization failed:", (err as Error).message);
+  }
+
+  if (!config.mcpSharedSecret && technicianStore.size() === 0) {
     console.warn("");
-    console.warn("WARNING: No MCP_SHARED_SECRET and no NINJA_TECHNICIANS configured.");
+    console.warn("WARNING: No MCP_SHARED_SECRET, no DATABASE_URL, no NINJA_TECHNICIANS.");
     console.warn("/mcp endpoints are UNAUTHENTICATED. Fine for local dev, NOT for prod.");
     console.warn("");
-  } else if (config.technicians.length > 0) {
-    console.log(
-      `[ninja-mcp] ${config.technicians.length} per-tech token(s) registered: ${config.technicians.map((t) => t.email).join(", ")}`
-    );
   }
 
   if (!config.publicBaseUrl) {
@@ -258,25 +288,25 @@ function requireSharedSecret(req: Request, res: Response, next: NextFunction): v
   next();
 }
 
-// /mcp/* auth — accepts EITHER:
-//   1. A per-technician token (?token=... or Bearer) that matches a configured
-//      entry in NINJA_TECHNICIANS. Resolves to that tech's identity for
-//      assignment and comment signing.
-//   2. The MCP_SHARED_SECRET — admin/fallback access, no per-request identity
-//      (falls back to TECHNICIAN_EMAIL config).
+// /mcp/* auth. Accepts:
+//   1. A per-technician token matching a row in the `technicians` DB table
+//      (or NINJA_TECHNICIANS env var if no DATABASE_URL). Resolves to that
+//      tech's identity for assignment + comment signing.
+//   2. The MCP_SHARED_SECRET — admin/fallback access, no per-request identity.
 //
-// If NINJA_TECHNICIANS is non-empty, the shared secret is still accepted but
-// flagged as such. If NINJA_TECHNICIANS is empty and MCP_SHARED_SECRET is set,
-// behavior is unchanged from earlier versions. If both are empty, the endpoint
-// is open (local dev).
-function requireMcpAuth(req: Request, res: Response, next: NextFunction): void {
+// If neither tech-store nor MCP_SHARED_SECRET is configured, the endpoint is
+// open (local dev only).
+//
+// On unknown token: triggers a re-sync from NinjaOne before giving up — so a
+// freshly-added tech can use their token immediately without waiting for the
+// next periodic refresh.
+async function requireMcpAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
   const headerToken = req.header("authorization")?.replace(/^Bearer\s+/i, "");
   const queryToken = typeof req.query.token === "string" ? req.query.token : undefined;
   const presented = headerToken ?? queryToken;
 
-  // Try per-technician allowlist first.
-  if (presented && config.technicians.length > 0) {
-    const tech = config.technicians.find((t) => t.token === presented);
+  if (presented) {
+    const tech = await technicianStore.findWithRefresh(presented);
     if (tech) {
       (req as Request & { mcpAuth?: AuthMode }).mcpAuth = {
         kind: "technician",
@@ -286,23 +316,21 @@ function requireMcpAuth(req: Request, res: Response, next: NextFunction): void {
       next();
       return;
     }
+
+    if (config.mcpSharedSecret && presented === config.mcpSharedSecret) {
+      (req as Request & { mcpAuth?: AuthMode }).mcpAuth = { kind: "shared-secret" };
+      next();
+      return;
+    }
   }
 
-  // Fallback to shared secret (admin / legacy).
-  if (config.mcpSharedSecret && presented === config.mcpSharedSecret) {
-    (req as Request & { mcpAuth?: AuthMode }).mcpAuth = { kind: "shared-secret" };
-    next();
-    return;
-  }
-
-  // Local dev: no auth configured.
-  if (!config.mcpSharedSecret && config.technicians.length === 0) {
+  // Local dev: no auth configured at all.
+  if (!config.mcpSharedSecret && technicianStore.size() === 0) {
     (req as Request & { mcpAuth?: AuthMode }).mcpAuth = { kind: "open" };
     next();
     return;
   }
 
-  // Reject — no valid token.
   res
     .status(401)
     .set("WWW-Authenticate", `Bearer realm="MCP"`)
@@ -311,8 +339,8 @@ function requireMcpAuth(req: Request, res: Response, next: NextFunction): void {
       error:
         "Unauthorized. Append ?token=<your-personal-token> to the URL, or send Authorization: Bearer <token>.",
       hint:
-        config.technicians.length > 0
-          ? "This server is configured with per-technician tokens. Ask your admin for your personal token."
+        technicianStore.size() > 0
+          ? "This server has per-technician tokens. Ask your admin for your personal token (visible in the Railway DB browser)."
           : "This server is configured with a shared secret. The presented token doesn't match."
     });
 }

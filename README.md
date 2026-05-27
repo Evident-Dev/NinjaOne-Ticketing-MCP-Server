@@ -2,14 +2,19 @@
 
 A Railway-hosted MCP server that gives Claude full access to NinjaOne — tickets, customers, devices, and alerts — via separate per-domain endpoints so Claude only loads the toolset it needs.
 
-**Version:** 0.6.0
+**Version:** 0.7.0
+
+## What changed in 0.7.0
+
+- **DB-backed technician registry.** Attach a Railway Postgres to the service and the MCP server takes over: on every boot (and every 15 minutes thereafter, and on any auth-miss) it pulls technicians from NinjaOne `/users`, inserts new ones into a `technicians` table, and auto-generates a personal token for each. No env-var bookkeeping when new techs join.
+- **Tokens visible in the Railway DB browser.** Admin opens the `technicians` table and copies tokens to hand out. No secret-printing in logs.
+- **Backward compatible** — if `DATABASE_URL` isn't set, the old `NINJA_TECHNICIANS` env-var allowlist still works.
 
 ## What changed in 0.6.0
 
-- **Per-technician tokens.** Multi-tech teams can now share one MCP deployment with per-tech identity. Each tech gets a personal token they append to the MCP URL (`?token=<their-token>`). The server validates the token against an allowlist (`NINJA_TECHNICIANS`), rejects unknown tokens with 401, and uses the matched email as the auto-assignee + comment signer for that connection.
-- **Identity from URL, not headers** — works with Claude.ai's custom-connector UI (which doesn't expose a header field).
-- **`ninja_whoami` now reports which identity source resolved** — `url-token`, `config` (TECHNICIAN_EMAIL fallback), or `none`. Great for debugging "wait, why is the wrong tech on this ticket?"
-- **Backward compatible**: `MCP_SHARED_SECRET` still works for admin / single-tech setups. If `NINJA_TECHNICIANS` is empty, behavior is identical to 0.5.x.
+- **Per-technician tokens** (URL-based) so multi-tech teams can share one deployment.
+- **Identity from URL, not headers** — works with Claude.ai's custom-connector UI.
+- **`ninja_whoami` reports identity source** — `url-token`, `config`, or `none`.
 
 ---
 
@@ -147,32 +152,39 @@ You should see `{ "authenticated": true, "saved_at": "...", ... }`.
 
 **Re-authentication:** rare. The background keepalive refreshes the token every 12 hours, so as long as the server stays up the token never expires. If NinjaOne ever invalidates it (e.g. you revoke API access), the next write will fail with a clear "re-authorize" message and you just visit `/auth/login` again.
 
-### 5. (Multi-tech only) Configure per-technician tokens
+### 5. (Multi-tech only) Set up the technician registry
 
 Skip this if you're a one-person shop — the `MCP_SHARED_SECRET` + `TECHNICIAN_EMAIL` from earlier works fine.
 
-For a team where each tech should see their own name on tickets they create:
+For a team, you have two options:
 
-1. Generate one token per tech (any long random string, e.g. `openssl rand -hex 24`).
-2. Set the `NINJA_TECHNICIANS` env var in Railway. Two accepted formats:
+#### Option A — DB-backed (recommended)
 
-   **JSON** (recommended for >2 techs):
-   ```json
-   [
-     {"email":"alice@beardmangroup.com","token":"tok_alice_long_random","name":"Alice"},
-     {"email":"bob@beardmangroup.com","token":"tok_bob_long_random","name":"Bob"}
-   ]
+1. **In Railway → your project → + New → Database → Postgres.**
+2. Attach it to the MCP service. Railway auto-injects `DATABASE_URL` as an env var.
+3. Redeploy. The boot logs will show:
    ```
-
-   **CSV**:
+   [tech-store] DB schema ready (table: technicians)
+   [tech-store] DB mode: 7 technician(s) registered, 7 new
+   [tech-store] view the new tokens in Railway → Postgres → Data → technicians
    ```
-   alice@beardmangroup.com:tok_alice_long_random:Alice,bob@beardmangroup.com:tok_bob_long_random:Bob
-   ```
+4. **Open Railway → Postgres service → Data tab → `technicians` table** to see each tech's auto-generated token. Hand them out privately.
+5. New techs added in NinjaOne automatically get a row + token within 15 minutes of being added (or instantly the first time they try to use a token).
 
-3. Redeploy. The boot logs should print: `[ninja-mcp] 2 per-tech token(s) registered: alice@...,bob@...`.
-4. Each tech connects to a personal URL — see step 6 below.
+#### Option B — Static env-var allowlist (DB-less)
 
-The token IS the identity. It's not authenticated cryptographically — it's a bearer token like a personal API key. If a tech leaves, remove their entry from `NINJA_TECHNICIANS` and redeploy.
+If you don't want a database, set `NINJA_TECHNICIANS` instead. JSON or CSV:
+
+```json
+[
+  {"email":"alice@beardmangroup.com","token":"tok_alice_xxx","name":"Alice"},
+  {"email":"bob@beardmangroup.com","token":"tok_bob_xxx","name":"Bob"}
+]
+```
+
+Generate tokens with `openssl rand -hex 24`. Updating the team = editing the env var + redeploying.
+
+The token IS the identity in both modes — it's a personal API key, not cryptographically authenticated. Treat it like a password.
 
 ### 6. Connect from Claude
 
