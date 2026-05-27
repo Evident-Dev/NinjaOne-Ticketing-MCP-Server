@@ -38,15 +38,18 @@ Every endpoint also exposes `ninja_status` (connection check) and `ninja_whoami`
 
 ### 1. Create a NinjaOne API app
 
-In the NinjaOne admin console:
+In the NinjaOne admin console: **Administration → Apps → API → Client app IDs → + Add client app**.
 
-1. **Administration → Apps → API → Add** (a "Client App ID").
-2. **Application Platform:** `API Services (machine-to-machine)`.
-3. **Name:** `Claude MCP` (or anything).
-4. **Redirect URIs:** leave blank — we don't use authorization-code flow.
-5. **Scopes:** check `monitoring` and `management`. (`control` and `offline_access` not needed.)
-6. **Allowed Grant Types:** check `Client Credentials`. Uncheck the others.
-7. Save. You'll be shown a **Client ID** and **Client Secret** — copy both somewhere safe. The secret is shown **once**.
+![NinjaOne API client app setup](docs/images/ninjaone-api-app-setup.png)
+
+Fill it in exactly like the screenshot:
+
+1. **Application Platform:** `API Services (machine-to-machine)` — this is the critical choice; it's what makes Client Credentials available below.
+2. **Name:** anything (e.g. `Your MCP Server`).
+3. **Redirect URIs:** leave blank — we don't use authorization-code flow, so no callback URL is needed.
+4. **Scopes:** check **Monitoring** and **Management**. (Control is optional and only needed if you ever want remote-control endpoints; offline_access isn't needed for client-credentials flow.)
+5. **Allowed Grant Types:** check **only** `Client credentials`. Leave Authorization Code and Refresh Token unchecked. (If you tick Authorization Code, NinjaOne will require a Redirect URI — you don't want that.)
+6. Click **Add**. You'll be shown the **Client ID** and **Client Secret** — copy both somewhere safe. The secret is shown **once**.
 
 **Then grant API permissions** (this is separate from OAuth scopes and is what actually controls what the app can do):
 
