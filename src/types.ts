@@ -1,6 +1,16 @@
+// ── Ticketing ────────────────────────────────────────────────────────────────
+
 export interface NinjaOrganization {
   id: number;
   name: string;
+  description?: string;
+  [key: string]: unknown;
+}
+
+export interface NinjaLocation {
+  id: number;
+  name: string;
+  address?: string;
   [key: string]: unknown;
 }
 
@@ -33,13 +43,13 @@ export interface NinjaTicketStatusRef {
 
 export interface NinjaTicket {
   id: number;
-  version: number;
-  clientId: number;
+  version?: number;
+  clientId?: number;
   ticketFormId?: number;
   locationId?: number;
   nodeId?: number;
   subject: string;
-  status: NinjaTicketStatusRef;
+  status?: NinjaTicketStatusRef | string;
   type?: TicketType;
   source?: string;
   priority?: TicketPriority;
@@ -51,8 +61,6 @@ export interface NinjaTicket {
   deleted?: boolean;
   attributeValues?: unknown[];
   ccList?: { uids?: string[]; emails?: string[] };
-  additionalAssignedTechnicianIds?: number[];
-  followupTime?: number;
   [key: string]: unknown;
 }
 
@@ -83,6 +91,8 @@ export interface CreateTicketInput {
   organization_name?: string;
   organization_id?: number;
   organization_domain?: string;
+  location_id?: number;
+  node_id?: number;
   summary: string;
   description: string;
   type?: TicketType;
@@ -90,22 +100,57 @@ export interface CreateTicketInput {
   severity?: TicketSeverity;
   status?: string;
   requester_email?: string;
+  requester_uid?: string;
   assigned_app_user_id?: number;
   form_id?: number;
   tags?: string[];
+  attributes?: Record<string, unknown>;
+  cc_emails?: string[];
 }
 
 export interface UpdateTicketInput {
   ticket_id: number;
   summary?: string;
-  status?: TicketStatus;
+  status?: TicketStatus | string;
   type?: TicketType;
   priority?: TicketPriority;
   severity?: TicketSeverity;
   assigned_app_user_id?: number;
+  tags?: string[];
+  attributes?: Record<string, unknown>;
   comment_body?: string;
   comment_public?: boolean;
 }
+
+// ── Devices ──────────────────────────────────────────────────────────────────
+
+export interface NinjaDevice {
+  id: number;
+  systemName?: string;
+  displayName?: string;
+  dnsName?: string;
+  organizationId?: number;
+  locationId?: number;
+  nodeClass?: string;
+  offline?: boolean;
+  lastContact?: number;
+  [key: string]: unknown;
+}
+
+// ── Alerts ───────────────────────────────────────────────────────────────────
+
+export interface NinjaAlert {
+  uid: string;
+  deviceId?: number;
+  sourceType?: string;
+  severity?: "MINOR" | "MODERATE" | "MAJOR" | "CRITICAL" | "NONE";
+  status?: string;
+  message?: string;
+  createTime?: number;
+  [key: string]: unknown;
+}
+
+// ── OAuth ────────────────────────────────────────────────────────────────────
 
 export interface NinjaTokenResponse {
   access_token: string;

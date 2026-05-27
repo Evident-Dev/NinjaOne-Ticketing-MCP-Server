@@ -1,22 +1,35 @@
+// NinjaOne regional endpoints. The OAuth token endpoint lives at /oauth/token
+// (also reachable via /ws/oauth/token) on these same hosts, and the REST API
+// lives under /api/v2.
+const REGION_BASE_URLS = {
+  us: "https://app.ninjarmm.com",
+  eu: "https://eu.ninjarmm.com",
+  oc: "https://oc.ninjarmm.com",
+  ca: "https://ca.ninjarmm.com",
+  us2: "https://us2.ninjarmm.com",
+  fed: "https://app.ninjaone.us"
+} as const;
+
+export type NinjaRegion = keyof typeof REGION_BASE_URLS;
+
+const VALID_REGIONS = Object.keys(REGION_BASE_URLS) as NinjaRegion[];
+
 export interface AppConfig {
   port: number;
-  ninjaTokenUrl: string;
-  ninjaAuthorizeUrl: string;
-  ninjaApiBaseUrl: string;
+  ninjaRegion: NinjaRegion;
+  ninjaBaseUrl: string;     // e.g. https://app.ninjarmm.com
+  ninjaTokenUrl: string;    // e.g. https://app.ninjarmm.com/oauth/token (or instance URL)
+  ninjaApiBaseUrl: string;  // e.g. https://app.ninjarmm.com/api/v2 (or instance URL)
   ninjaClientId: string;
   ninjaClientSecret: string;
-  oauthRedirectUri: string;
   oauthScope: string;
-  tokenStorePath: string;
-  sessionStorePath: string;
-  publicBaseUrl?: string;
   mcpSharedSecret?: string;
   defaultTicketFormId?: number;
   defaultBoardId?: number;
   technicianEmail?: string;
 }
 
-const REQUIRED = ["NINJA_TOKEN_URL", "NINJA_API_BASE_URL", "NINJA_CLIENT_ID", "NINJA_CLIENT_SECRET"] as const;
+const REQUIRED = ["NINJA_CLIENT_ID", "NINJA_CLIENT_SECRET"] as const;
 
 export function getMissingVars(): string[] {
   return REQUIRED.filter((name) => !process.env[name]?.trim());
@@ -34,34 +47,38 @@ function optionalNumber(name: string): number | undefined {
   return parsed;
 }
 
-function deriveAuthorizeUrl(tokenUrl: string): string {
-  // NinjaOne's canonical OAuth paths live under /ws/oauth/. The token endpoint
-  // is forgiving (both /oauth/token and /ws/oauth/token work), but /authorize
-  // must be /ws/oauth/authorize. Normalize regardless of which form the user
-  // configured for NINJA_TOKEN_URL.
-  return tokenUrl.replace(/\/(?:ws\/)?oauth\/token\/?$/, "/ws/oauth/authorize");
+function stripTrailingSlash(url: string): string {
+  return url.replace(/\/+$/, "");
 }
 
 export function loadConfig(): AppConfig {
-  const tokenUrl = optional("NINJA_TOKEN_URL");
-  const railwayDomain = optional("RAILWAY_PUBLIC_DOMAIN");
-  const publicBase =
-    optional("PUBLIC_BASE_URL").replace(/\/$/, "") ||
-    (railwayDomain ? `https://${railwayDomain}` : "");
-  const explicitRedirect = optional("OAUTH_REDIRECT_URI");
+  const regionInput = optional("NINJA_REGION").toLowerCase() || "us";
+  if (!(VALID_REGIONS as string[]).includes(regionInput)) {
+    throw new Error(
+      `Invalid NINJA_REGION '${regionInput}'. Valid regions: ${VALID_REGIONS.join(", ")}`
+    );
+  }
+  const ninjaRegion = regionInput as NinjaRegion;
+  const regionBase = REGION_BASE_URLS[ninjaRegion];
+
+  // Explicit URL overrides win — useful for partner/whitelabel instances on
+  // non-standard hostnames (rmmservices.net etc).
+  const explicitBase = stripTrailingSlash(optional("NINJA_BASE_URL"));
+  const ninjaBaseUrl = explicitBase || regionBase;
+  const ninjaApiBaseUrl =
+    stripTrailingSlash(optional("NINJA_API_BASE_URL")) || `${ninjaBaseUrl}/api/v2`;
+  const ninjaTokenUrl =
+    stripTrailingSlash(optional("NINJA_TOKEN_URL")) || `${ninjaBaseUrl}/ws/oauth/token`;
 
   return {
     port: Number(process.env.PORT || 3000),
-    ninjaTokenUrl: tokenUrl,
-    ninjaAuthorizeUrl: optional("NINJA_AUTHORIZE_URL") || deriveAuthorizeUrl(tokenUrl),
-    ninjaApiBaseUrl: optional("NINJA_API_BASE_URL").replace(/\/$/, ""),
+    ninjaRegion,
+    ninjaBaseUrl,
+    ninjaTokenUrl,
+    ninjaApiBaseUrl,
     ninjaClientId: optional("NINJA_CLIENT_ID"),
     ninjaClientSecret: optional("NINJA_CLIENT_SECRET"),
-    oauthRedirectUri: explicitRedirect || (publicBase ? `${publicBase}/auth/callback` : ""),
-    oauthScope: optional("OAUTH_SCOPE") || "monitoring management offline_access",
-    tokenStorePath: optional("TOKEN_STORE_PATH") || "/data/ninja-token.json",
-    sessionStorePath: optional("SESSION_STORE_PATH") || "/data/sessions.json",
-    publicBaseUrl: publicBase || undefined,
+    oauthScope: optional("OAUTH_SCOPE") || "monitoring management",
     mcpSharedSecret: process.env.MCP_SHARED_SECRET?.trim() || undefined,
     defaultTicketFormId: optionalNumber("DEFAULT_TICKET_FORM_ID"),
     defaultBoardId: optionalNumber("DEFAULT_BOARD_ID"),

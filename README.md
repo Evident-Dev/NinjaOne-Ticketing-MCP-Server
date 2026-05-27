@@ -1,240 +1,257 @@
-# NinjaOne Ticketing MCP Server
+# NinjaOne MCP Server
 
-An MCP server that lets Claude create and manage NinjaOne support tickets using natural language. Deployed on Railway, connected to Claude Desktop (or any MCP client) in minutes.
+A Railway-hosted MCP server that gives Claude full access to NinjaOne — tickets, customers, devices, and alerts — via separate per-domain endpoints so Claude only loads the toolset it needs.
 
-**Example prompts once connected:**
-- *"Create a ticket for Acme Corp, their email is down"*
-- *"Add a note to ticket 1042 saying we're waiting on the vendor"*
-- *"Close ticket 1038 and mark it resolved"*
-- *"Find the org for someone@clientdomain.com and open a high-priority incident"*
+**Version:** 0.4.0
+**Status:** v0.4.0 is a ground-up rewrite of the auth layer. Tickets, comments, devices, and alerts now work via pure OAuth 2.0 client-credentials. No per-user OAuth dance.
+
+---
+
+## What changed in 0.4.0
+
+- **Auth is now client_credentials only** — one API app, one set of credentials, works for reads *and* writes (ticket creation, comments, reboots). The old per-user OAuth flow is gone.
+- **Split into 5 endpoints** — `/mcp/tickets`, `/mcp/customers`, `/mcp/devices`, `/mcp/alerts`, plus `/mcp` for everything. Add only the slices you need in Claude → smaller tool-schema cost.
+- **New domains** — devices (list/get/reboot/activities) and alerts (list/summary/reset).
+- **Better error surfacing** — when NinjaOne rejects something, you now see the actual `resultCode` and `errorMessage`.
+- **Multi-region** — set `NINJA_REGION` and base URLs are derived. Supports `us, eu, oc, ca, us2, fed`.
+- **Automatic 401 retry** — if a token goes stale, we refresh and retry once.
+
+---
+
+## Endpoints
+
+Each endpoint is a separate MCP server. Add only the ones you want in Claude.
+
+| URL | Tools | Use for |
+|---|---|---|
+| `/mcp` | Everything below (≈22 tools) | Power users, scripted workflows |
+| `/mcp/tickets` | Create, get, update, close, comment, log, list-for-board, statuses, forms, boards, attributes (≈12) | Help-desk techs |
+| `/mcp/customers` | Find orgs, find by domain, get org, create org, list locations, find contact (≈6) | Account managers, ticket triage |
+| `/mcp/devices` | List, get, reboot, activity log (≈4) | Sysadmins, RMM work |
+| `/mcp/alerts` | List, summary by severity, reset (≈3) | NOC / monitoring |
+
+Every endpoint also exposes `ninja_status` (connection check) and `ninja_whoami` (technician identity).
 
 ---
 
 ## Setup
 
-### Step 1 - Create NinjaOne API credentials
+### 1. Create a NinjaOne API app
 
-1. Log into NinjaOne and go to **Administration -> Apps -> API**
-2. Click **Add** to create a new API application
-3. Enable BOTH grant types:
-   - **Client Credentials** (for read-only operations)
-   - **Authorization Code** (required for writes — see Step 4)
-4. Under **Allowed scopes**, enable: `monitoring`, `management`, `offline_access`
-5. Under **Redirect URIs**, add: `https://<YOUR_RAILWAY_URL>/auth/callback`
-   (You won't know the Railway URL until Step 2 — come back and fill this in then.)
-6. Copy the **Client ID** and **Client Secret** - you'll need them in Step 3
-7. Note your instance base URL - it's the domain you use to log in, e.g. `https://your-instance.rmmservices.net`
+In the NinjaOne admin console:
 
-> Why two grant types? NinjaOne refuses ticket writes with a `user_context_required` error when called with a pure machine token. Authorization Code lets the server obtain a user-scoped token via a one-time browser login, after which a long-lived refresh token keeps it renewed automatically.
+1. **Administration → Apps → API → Add** (a "Client App ID").
+2. **Application Platform:** `API Services (machine-to-machine)`.
+3. **Name:** `Claude MCP` (or anything).
+4. **Redirect URIs:** leave blank — we don't use authorization-code flow.
+5. **Scopes:** check `monitoring` and `management`. (`control` and `offline_access` not needed.)
+6. **Allowed Grant Types:** check `Client Credentials`. Uncheck the others.
+7. Save. You'll be shown a **Client ID** and **Client Secret** — copy both somewhere safe. The secret is shown **once**.
 
-### Step 2 - Deploy to Railway
+**Then grant API permissions** (this is separate from OAuth scopes and is what actually controls what the app can do):
 
-1. Fork this repo to your GitHub account
-2. Go to [railway.app](https://railway.app) and create a new project
-3. Choose **Deploy from GitHub repo** and select your fork
-4. Railway detects the `Dockerfile` and builds automatically - no extra config needed
-5. Once deployed, copy the public URL (e.g. `https://ninjaone-mcp-production.up.railway.app`) and go back to Step 1.5 to set it as the redirect URI in NinjaOne
+8. Back in the app, find the **API Permissions** / role section. Grant at minimum:
+   - **Ticketing:** Create, Read, Update (and Delete if you want close/delete)
+   - **Devices:** Read (and Manage if you want reboots)
+   - **Organizations:** Read (and Manage if you want to create new orgs from Claude)
+   - **Alerts:** Read (and Manage if you want to reset alerts)
+9. Save. Permissions changes are usually immediate but can take a minute to propagate.
 
-### Step 3 - Add a Railway Volume for token storage
+> **If ticket creation returns `403` with `resultCode: user_context_required`, this is almost always a permissions issue at step 8 — the API app doesn't have ticketing-write permission.** The OAuth scope (`management`) authorizes the token; the API permission on the app role authorizes the action.
 
-Writes require a user-scoped refresh token that needs to survive redeploys. In your Railway project:
+### 2. Find your region
 
-1. Open the service **Settings -> Volumes**
-2. Click **Add Volume** and mount it at `/data`
-3. Save — Railway redeploys with the volume attached
+NinjaOne tenants are regional. Pick the one that matches the host you log into:
 
-(If you skip this step, set `TOKEN_STORE_PATH=./ninja-token.json` instead — but the token will be wiped on every redeploy and you'll have to re-login.)
-
-### Step 4 - Set environment variables in Railway
-
-In your Railway project, go to **Variables -> Raw Editor**. Paste the block below as-is, then fill in your values and click **Update Variables**:
-
-```env
-NINJA_TOKEN_URL=https://<YOUR_INSTANCE>.rmmservices.net/oauth/token
-NINJA_API_BASE_URL=https://<YOUR_INSTANCE>.rmmservices.net/api/v2
-NINJA_CLIENT_ID=
-NINJA_CLIENT_SECRET=
-MCP_SHARED_SECRET=
-TECHNICIAN_EMAIL=
-DEFAULT_TICKET_FORM_ID=
-```
-
-| Variable | What to put |
-|---|---|
-| `NINJA_TOKEN_URL` | Replace `<YOUR_INSTANCE>` with your NinjaOne subdomain |
-| `NINJA_API_BASE_URL` | Replace `<YOUR_INSTANCE>` with your NinjaOne subdomain |
-| `NINJA_CLIENT_ID` | From Step 1 |
-| `NINJA_CLIENT_SECRET` | From Step 1 |
-| `MCP_SHARED_SECRET` | Generated secret - see below |
-| `TECHNICIAN_EMAIL` | Your NinjaOne login email - see below |
-| `DEFAULT_TICKET_FORM_ID` | Leave blank for now (see Step 6) |
-
-Advanced (optional):
-
-| Variable | Default | Purpose |
+| Region code | Web URL | Use if you log in at… |
 |---|---|---|
-| `PUBLIC_BASE_URL` | Derived from `RAILWAY_PUBLIC_DOMAIN` | Override only if you're hosting elsewhere or behind a custom domain |
-| `OAUTH_REDIRECT_URI` | `<PUBLIC_BASE_URL>/auth/callback` | Override if your redirect URI doesn't follow the standard pattern |
-| `OAUTH_SCOPE` | `monitoring management offline_access` | Override the requested scopes |
-| `NINJA_AUTHORIZE_URL` | Derived from `NINJA_TOKEN_URL` (swaps `/token` for `/authorize`) | Set explicitly if your tenant uses a non-standard authorize path |
-| `TOKEN_STORE_PATH` | `/data/ninja-token.json` | Where to persist the refresh token. Defaults to the Railway Volume mount. |
+| `us` | https://app.ninjarmm.com | …app.ninjarmm.com (most US accounts) |
+| `eu` | https://eu.ninjarmm.com | …eu.ninjarmm.com |
+| `oc` | https://oc.ninjarmm.com | …oc.ninjarmm.com (Oceania/APAC) |
+| `ca` | https://ca.ninjarmm.com | …ca.ninjarmm.com (Canada) |
+| `us2` | https://us2.ninjarmm.com | …us2.ninjarmm.com |
+| `fed` | https://app.ninjaone.us | NinjaOne Federal |
 
-#### Generating your `MCP_SHARED_SECRET`
+If you're on a partner / whitelabel instance with its own hostname (e.g. `something.rmmservices.net`), skip `NINJA_REGION` and set `NINJA_BASE_URL` to your full hostname instead.
 
-Go to [generate-secret.vercel.app/64](https://generate-secret.vercel.app/64) - it will generate a secure random string for you. Copy it and paste it as the `MCP_SHARED_SECRET` value in Railway.
+### 3. Deploy to Railway
 
-Alternatively, if you have Node.js installed locally:
+1. **Fork** this repo (or push it to your own GitHub).
+2. In Railway: **New Project → Deploy from GitHub** → pick the repo. Railway detects the Dockerfile and builds automatically.
+3. After the first deploy, go to the service's **Settings → Networking** and click **Generate Domain**. Note the public URL (e.g. `https://ninja-mcp-production.up.railway.app`).
+4. Go to **Variables** and add:
 
-```bash
-node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-```
+   | Variable | Required? | Value |
+   |---|---|---|
+   | `NINJA_CLIENT_ID` | **Yes** | Client ID from step 1 |
+   | `NINJA_CLIENT_SECRET` | **Yes** | Client Secret from step 1 |
+   | `NINJA_REGION` | Recommended | `us`, `eu`, `oc`, `ca`, `us2`, or `fed` |
+   | `MCP_SHARED_SECRET` | **Yes for production** | Any long random string — Claude uses this as a Bearer token to authenticate to the MCP endpoints. Generate one with `openssl rand -hex 32` or any password manager. |
+   | `TECHNICIAN_EMAIL` | Optional | Your NinjaOne login email — if set, comments are signed with your name and tickets default to you as assignee |
+   | `DEFAULT_TICKET_FORM_ID` | Optional | Numeric ID of your default ticket form. Find it via the `ninja_list_ticket_forms` tool after first connecting. |
+   | `NINJA_BASE_URL` | Only for whitelabel | Full base URL if not using a stock region |
+   | `NINJA_TOKEN_URL` | Rarely | Explicit OAuth token URL (overrides region) |
+   | `NINJA_API_BASE_URL` | Rarely | Explicit API base URL (overrides region) |
 
-> `PORT` is injected automatically by Railway. Do not set it manually.
+5. Redeploy if Railway didn't automatically.
+6. Visit `https://<your-domain>/health` — should return `{ ok: true, configured: true, ... }`.
+7. Test the NinjaOne connection (replace `<SECRET>`):
+   ```
+   curl -H "Authorization: Bearer <SECRET>" \
+        https://<your-domain>/debug/test-ninja
+   ```
+   Should return `{ ok: true, orgCount: N, sample: [...] }`.
 
-#### About `TECHNICIAN_EMAIL`
+### 4. Connect from Claude
 
-Set this to the email address you use to log into NinjaOne. When configured:
-- **Tickets you create are auto-assigned to you** - no need to specify an assignee
-- **Comments are signed with your name** - since the NinjaOne API attributes everything to the API application, this appends your name so comments are traceable
+In Claude (Desktop, Web, or Code) add each MCP server you want. Use the URL plus the shared secret as a Bearer token.
 
-This is per-deployment: if multiple people on your team each deploy their own Railway instance, each sets their own email. Use `ninja_whoami` to confirm it's wired up correctly.
-
-After saving variables Railway will redeploy. Once it's green, confirm it's working:
-
-```
-GET https://<YOUR_RAILWAY_URL>/health
-```
-
-### Step 5 - Connect Claude
-
-The MCP server speaks the **MCP OAuth 2.1** protocol, so Claude.ai opens a login popup the first time you use a tool — no shared secrets in URLs. Each technician who connects gets their own NinjaOne identity, and tickets/comments are attributed to whoever is logged in.
-
----
-
-#### Option A - Claude.ai (browser, no install required)
-
-1. Go to [claude.ai](https://claude.ai) and open **Settings -> Integrations**
-2. Click **Add custom integration**
-3. Fill in the form:
-   - **Name:** NinjaOne Tickets
-   - **Remote MCP server URL:** `https://<YOUR_RAILWAY_URL>/mcp`
-4. Click **Add**. The first time you invoke a NinjaOne tool in a conversation, Claude.ai pops a browser tab to log into NinjaOne. Approve once and you're connected.
-
-> Each Claude.ai user who connects this MCP gets their own NinjaOne session via OAuth — tickets and comments will be signed with that user's name automatically.
-
----
-
-#### Option B - Claude Desktop (Mac/Windows app)
-
-Open your config file:
-- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
-- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
-
-Add this entry under `mcpServers`:
-
+**Claude Desktop / Code config example** (`mcp_servers` in your config):
 ```json
 {
   "mcpServers": {
-    "ninjaone": {
-      "type": "http",
-      "url": "https://<YOUR_RAILWAY_URL>/mcp"
+    "ninja-tickets": {
+      "url": "https://<your-domain>/mcp/tickets",
+      "headers": { "Authorization": "Bearer <MCP_SHARED_SECRET>" }
+    },
+    "ninja-customers": {
+      "url": "https://<your-domain>/mcp/customers",
+      "headers": { "Authorization": "Bearer <MCP_SHARED_SECRET>" }
     }
   }
 }
 ```
 
-Restart Claude Desktop. The first NinjaOne tool call will trigger the OAuth login flow in your browser.
+**Claude.ai (web) custom MCP connector:** paste the endpoint URL, then add an `Authorization: Bearer <MCP_SHARED_SECRET>` header.
 
----
-
-#### Option C - Claude Code (CLI)
-
-For the terminal crowd. Run this once to register the server globally:
-
-```bash
-claude mcp add ninjaone --transport http https://<YOUR_RAILWAY_URL>/mcp
-```
-
-The tools will be available in every Claude Code session from that point on. Claude Code will prompt for OAuth login the first time. To verify:
-
-```bash
-claude mcp list
-```
-
----
-
-### Step 6 - (Optional) Set default form ID
-
-If you always want tickets to use a specific form without having to specify it every time, ask Claude:
-
-> *"List the NinjaOne ticket forms"*
-
-Then go back to Railway **Variables** and set `DEFAULT_TICKET_FORM_ID` to the numeric ID of your preferred form. Railway will redeploy automatically.
-
----
-
-## Available tools
-
-| Tool | What it does |
-|---|---|
-| `ninja_auth_status` | Check whether the server has a user-scoped NinjaOne token. Returns a login URL if not. |
-| `ninja_whoami` | Show which technician this server is configured as |
-| `ninja_find_organizations` | Fuzzy-search organizations by name |
-| `ninja_find_org_by_domain` | Resolve a client org from an email domain |
-| `ninja_find_contact` | Look up a contact by name or email |
-| `ninja_list_ticket_forms` | List available ticket forms |
-| `ninja_list_ticket_boards` | List available ticket boards (saved filter views) |
-| `ninja_list_tickets_for_board` | List tickets currently on a specific board |
-| `ninja_list_ticket_statuses` | List configured ticket statuses |
-| `ninja_list_ticket_attributes` | List configured ticket attribute/custom field definitions |
-| `ninja_get_ticket` | Fetch a ticket by ID |
-| `ninja_get_ticket_log` | Fetch the full activity/comment log for a ticket |
-| `ninja_create_ticket` | Create a new ticket (requires user auth — see Step 5) |
-| `ninja_update_ticket` | Update fields and/or add a comment (requires user auth) |
-| `ninja_add_comment` | Add a public reply or internal note (requires user auth) |
-
----
-
-## Troubleshooting
-
-**Writes fail with "NinjaOne user authentication required..."**
-The refresh token is missing or expired. The error message includes the login URL — open it in a browser and re-approve. Or call `ninja_auth_status` to get the URL.
-
-**Login completes but writes still fail with `user_context_required`**
-Check that you enabled the `offline_access` scope on the NinjaOne API app. Without it, no refresh token is issued and the server can't mint user-scoped tokens.
-
-**Refresh token gets wiped on every redeploy**
-You skipped Step 3 (Railway Volume). Either provision the volume or accept that you'll need to re-login after each deploy.
-
-**`ninja_find_contact` returns nothing for a known contact**
-The contact list is cached for 5 minutes. If you just added the contact in NinjaOne, wait or redeploy.
+> Add as many or as few endpoints as you want. A help-desk workflow really only needs `tickets` + `customers`. Skipping `devices` and `alerts` saves Claude from loading their tool schemas, which costs tokens on every turn.
 
 ---
 
 ## Local development
 
 ```bash
-cp .env.example .env
-# Edit .env with your values. For local dev:
-#   PUBLIC_BASE_URL=http://localhost:3000
-#   TOKEN_STORE_PATH=./ninja-token.json
-# And add http://localhost:3000/auth/callback to the redirect URIs in NinjaOne.
 npm install
+cp .env.example .env
+# fill in NINJA_CLIENT_ID, NINJA_CLIENT_SECRET, NINJA_REGION
 npm run dev
 ```
 
-Confirm it's running:
+The server listens on `http://localhost:3000`. With no `MCP_SHARED_SECRET` set locally, the endpoints are open for testing.
+
+Quick smoke test:
 ```bash
 curl http://localhost:3000/health
+curl http://localhost:3000/debug/test-ninja
 ```
 
-Test the NinjaOne connection:
-```bash
-curl -H "Authorization: Bearer <YOUR_MCP_SHARED_SECRET>" \
-     http://localhost:3000/debug/test-ninja
-```
+---
 
-Then visit `http://localhost:3000/auth/login?token=<YOUR_MCP_SHARED_SECRET>` once to complete the OAuth handshake.
+## Tool reference
+
+### Tickets (`/mcp/tickets`)
+
+| Tool | Purpose |
+|---|---|
+| `ninja_create_ticket` | Create a ticket. Org resolution via `organization_id`, `organization_name` (fuzzy), or `organization_domain`. Supports custom fields via `attributes`. |
+| `ninja_get_ticket` | Fetch a ticket by ID. |
+| `ninja_update_ticket` | Update any combination of subject/status/priority/severity/type/assignee/tags/attributes; optional `comment_body`. |
+| `ninja_close_ticket` | Convenience: set status to CLOSED, optionally with a final comment. |
+| `ninja_add_comment` | Public reply or internal note; optional `time_tracked` in seconds. |
+| `ninja_get_ticket_log` | Full comment + activity history. |
+| `ninja_list_tickets_for_board` | Tickets on a specific board. |
+| `ninja_list_ticket_forms` | Discover ticket forms. |
+| `ninja_list_ticket_boards` | Discover boards. |
+| `ninja_list_ticket_statuses` | Discover statuses + their IDs. |
+| `ninja_list_ticket_attributes` | Discover custom fields. |
+
+### Customers (`/mcp/customers`)
+
+| Tool | Purpose |
+|---|---|
+| `ninja_find_organizations` | Fuzzy search by name. |
+| `ninja_find_org_by_domain` | Look up org from `acme.com` (or `user@acme.com`). |
+| `ninja_get_organization` | Org details by ID. |
+| `ninja_list_organization_locations` | Locations belonging to an org. |
+| `ninja_create_organization` | Create a new customer org. |
+| `ninja_find_contact` | Search contacts by name/email; returns UIDs needed as ticket requesters. |
+
+### Devices (`/mcp/devices`)
+
+| Tool | Purpose |
+|---|---|
+| `ninja_list_devices` | List devices; optional `organization_id` filter. |
+| `ninja_get_device` | Device details by ID. |
+| `ninja_device_activities` | Recent device activity log. |
+| `ninja_reboot_device` | Schedule reboot (`NORMAL` or `FORCED`). Destructive — Claude confirms first. |
+
+### Alerts (`/mcp/alerts`)
+
+| Tool | Purpose |
+|---|---|
+| `ninja_list_alerts` | All active alerts; optional `device_id` or `source_type`. |
+| `ninja_alerts_summary` | Count grouped by severity. |
+| `ninja_reset_alert` | Dismiss a single alert by UID. |
+
+### Always available
+
+| Tool | Purpose |
+|---|---|
+| `ninja_status` | Connection + region + scope check. |
+| `ninja_whoami` | Technician identity (from `TECHNICIAN_EMAIL`). |
+
+---
+
+## Troubleshooting
+
+**`401 Unauthorized` from `/mcp/...`**
+You forgot to send the `Authorization: Bearer <MCP_SHARED_SECRET>` header, or it doesn't match the env var.
+
+**`NinjaOne token request failed (401)` in logs**
+Wrong `NINJA_CLIENT_ID` / `NINJA_CLIENT_SECRET`, wrong region, or the API app doesn't have **Client Credentials** as an allowed grant type.
+
+**Ticket create returns `403` with `user_context_required`**
+The API app is missing the **Ticketing → Create/Update** permission. Go back to step 1.8 in setup and grant it. This is a permission on the app role, not the OAuth scope.
+
+**Ticket create returns `400` with a field complaint**
+Now that errors are surfaced properly, the response body tells you which field NinjaOne is unhappy with. Common ones:
+- `priority` must be one of `NONE | LOW | MEDIUM | HIGH`
+- `severity` must be one of `NONE | MINOR | MODERATE | MAJOR | CRITICAL`
+- `status` must be a known status name or numeric ID (use `ninja_list_ticket_statuses`)
+- Custom attributes must use the attribute IDs from `ninja_list_ticket_attributes`
+
+**Reads work but writes don't, even with permissions**
+Double-check that your API app's allowed scopes include `management` (not just `monitoring`). `monitoring` is read-only.
+
+**`Multiple organizations matched 'Acme'`**
+The org name is ambiguous. Use `ninja_find_organizations` to see options and call `ninja_create_ticket` with the explicit `organization_id`.
+
+**Whitelabel / partner instance**
+If your NinjaOne hostname isn't on the regional list, leave `NINJA_REGION` unset and set `NINJA_BASE_URL` (e.g. `https://something.rmmservices.net`) — token and API URLs are derived from it.
+
+---
+
+## Architecture
+
+- One Node process serves all endpoints.
+- One shared `NinjaClient` (in `src/ninja.ts`) handles token caching, 401 retry, and request-level errors.
+- Each `/mcp/<slice>` endpoint builds a fresh `McpServer` per request and registers only that slice's tool set. Stateless. No cross-request session bookkeeping.
+- The OAuth token is cached in memory, preemptively refreshed 2 minutes before expiry, and concurrent acquisitions are deduplicated.
+
+```
+src/
+  index.ts          ← Express app, endpoint routing
+  config.ts         ← env vars + region → URL derivation
+  types.ts          ← shared types
+  ninja.ts          ← NinjaClient (HTTP + auth + cache)
+  domains/
+    common.ts       ← DomainContext + jsonResult helper
+    status.ts       ← ninja_status, ninja_whoami (every endpoint)
+    tickets.ts      ← ticket tools
+    customers.ts    ← organization + contact tools
+    devices.ts      ← device tools
+    alerts.ts       ← alert tools
+```
 
 ---
 

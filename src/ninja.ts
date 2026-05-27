@@ -1,27 +1,25 @@
-import type { AsyncLocalStorage } from "node:async_hooks";
 import type { AppConfig } from "./config.js";
-import { loginUrl, refreshAccessToken, TokenStore } from "./auth.js";
-import type { Session, SessionStore } from "./sessions.js";
 import type {
   CreateTicketInput,
+  NinjaAlert,
   NinjaContact,
+  NinjaDevice,
+  NinjaLocation,
   NinjaOrganization,
   NinjaTicket,
   NinjaTokenResponse,
   NinjaUser,
   TicketComment,
-  TicketPriority,
-  TicketSeverity,
   UpdateTicketInput
 } from "./types.js";
+
+const CACHE_TTL_MS = 5 * 60 * 1000;
+const TOKEN_REFRESH_BUFFER_MS = 2 * 60 * 1000;
 
 interface CachedToken {
   accessToken: string;
   expiresAtMs: number;
-  userContext: boolean;
 }
-
-export type SessionContext = AsyncLocalStorage<Session | undefined>;
 
 interface CachedList<T> {
   items: T[];
@@ -42,33 +40,105 @@ interface TicketStatusRecord {
   displayName?: string;
 }
 
-const CACHE_TTL_MS = 5 * 60 * 1000;
+export class NinjaApiError extends Error {
+  readonly status: number;
+  readonly resultCode?: string;
+  readonly errorMessage?: string;
+  readonly rawBody: string;
+
+  constructor(method: string, path: string, status: number, rawBody: string) {
+    const parsed = tryParseJson(rawBody);
+    const resultCode = isRecord(parsed) ? stringOrUndef(parsed.resultCode) : undefined;
+    const errorMessage = isRecord(parsed)
+      ? stringOrUndef(parsed.errorMessage) ?? stringOrUndef(parsed.message)
+      : undefined;
+    const detail = errorMessage ? ` — ${errorMessage}` : "";
+    const codeTag = resultCode ? ` [${resultCode}]` : "";
+    super(`NinjaOne API error: ${method} ${path} → ${status}${codeTag}${detail} | body: ${rawBody.slice(0, 500)}`);
+    this.name = "NinjaApiError";
+    this.status = status;
+    this.resultCode = resultCode;
+    this.errorMessage = errorMessage;
+    this.rawBody = rawBody;
+  }
+}
 
 export class NinjaClient {
   private token?: CachedToken;
+  private tokenPromise?: Promise<CachedToken>;
   private orgCache?: CachedList<NinjaOrganization>;
   private contactCache?: CachedList<NinjaContact>;
   private statusCache?: CachedList<TicketStatusRecord>;
   private technicianProfile?: TechnicianProfile | null;
 
-  constructor(
-    private readonly config: AppConfig,
-    private readonly tokenStore: TokenStore,
-    private readonly sessionStore: SessionStore,
-    private readonly sessionContext: SessionContext
-  ) {}
+  constructor(private readonly config: AppConfig) {}
 
-  // Indicates whether some form of user-context token is available — either a
-  // request-scoped MCP session, or the legacy single-user refresh token on disk.
-  async hasUserAuth(): Promise<boolean> {
-    if (this.sessionContext.getStore()?.ninja_refresh_token) return true;
-    const stored = await this.tokenStore.load();
-    return !!stored?.refresh_token;
+  // ── Token management ─────────────────────────────────────────────────────
+
+  private async getAccessToken(): Promise<string> {
+    const now = Date.now();
+    if (this.token && this.token.expiresAtMs > now + TOKEN_REFRESH_BUFFER_MS) {
+      return this.token.accessToken;
+    }
+    // Dedupe concurrent acquisitions.
+    if (!this.tokenPromise) {
+      this.tokenPromise = this.acquireToken().finally(() => {
+        this.tokenPromise = undefined;
+      });
+    }
+    const fresh = await this.tokenPromise;
+    return fresh.accessToken;
   }
 
-  async testConnection(): Promise<{ ok: boolean; orgCount: number }> {
+  private async acquireToken(): Promise<CachedToken> {
+    const body = new URLSearchParams({
+      grant_type: "client_credentials",
+      client_id: this.config.ninjaClientId,
+      client_secret: this.config.ninjaClientSecret,
+      scope: this.config.oauthScope
+    });
+
+    const response = await fetch(this.config.ninjaTokenUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Accept: "application/json"
+      },
+      body
+    });
+
+    if (!response.ok) {
+      const text = await safeText(response);
+      throw new Error(
+        `NinjaOne token request failed (${response.status}). Check NINJA_CLIENT_ID/SECRET, NINJA_REGION, and that 'Client Credentials' is an allowed grant on the API app. Body: ${text}`
+      );
+    }
+
+    const data = (await response.json()) as NinjaTokenResponse;
+    if (!data.access_token) {
+      throw new Error("NinjaOne token response did not include access_token.");
+    }
+    const expiresInSeconds = data.expires_in ?? 3600;
+    this.token = {
+      accessToken: data.access_token,
+      expiresAtMs: Date.now() + expiresInSeconds * 1000
+    };
+    return this.token;
+  }
+
+  invalidateToken(): void {
+    this.token = undefined;
+  }
+
+  // ── Smoke test ────────────────────────────────────────────────────────────
+
+  async testConnection(): Promise<{ ok: boolean; orgCount: number; sample: Array<{ id: number; name: string }> }> {
     const orgs = await this.getOrganizations();
-    return { ok: true, orgCount: orgs.length };
+    return {
+      ok: true,
+      orgCount: orgs.length,
+      sample: orgs.slice(0, 3).map((o) => ({ id: o.id, name: o.name }))
+    };
   }
 
   // ── Organizations ────────────────────────────────────────────────────────
@@ -78,16 +148,12 @@ export class NinjaClient {
     if (this.orgCache && now - this.orgCache.fetchedAtMs < CACHE_TTL_MS) {
       return this.orgCache.items;
     }
-
     const data = await this.request<unknown>("/organizations", "GET");
-    let items: NinjaOrganization[] = [];
-
-    if (Array.isArray(data)) {
-      items = data.filter(isOrganization);
-    } else if (isRecord(data) && Array.isArray(data.results)) {
-      items = (data.results as unknown[]).filter(isOrganization);
-    }
-
+    const items = Array.isArray(data)
+      ? (data as unknown[]).filter(isOrganization)
+      : isRecord(data) && Array.isArray(data.results)
+        ? (data.results as unknown[]).filter(isOrganization)
+        : [];
     this.orgCache = { items, fetchedAtMs: now };
     return items;
   }
@@ -101,6 +167,27 @@ export class NinjaClient {
       .slice(0, limit);
   }
 
+  async getOrganization(orgId: number): Promise<NinjaOrganization> {
+    return this.request<NinjaOrganization>(`/organization/${orgId}`, "GET");
+  }
+
+  async getOrganizationLocations(orgId: number): Promise<NinjaLocation[]> {
+    const data = await this.request<unknown>(`/organization/${orgId}/locations`, "GET");
+    return Array.isArray(data) ? (data as NinjaLocation[]) : [];
+  }
+
+  async createOrganization(input: {
+    name: string;
+    description?: string;
+    nodeApprovalMode?: "AUTOMATIC" | "MANUAL" | "REJECT";
+  }): Promise<NinjaOrganization> {
+    return this.request<NinjaOrganization>("/organizations", "POST", {
+      name: input.name,
+      description: input.description,
+      nodeApprovalMode: input.nodeApprovalMode ?? "AUTOMATIC"
+    });
+  }
+
   // ── Contacts ─────────────────────────────────────────────────────────────
 
   async getContacts(): Promise<NinjaContact[]> {
@@ -108,7 +195,6 @@ export class NinjaClient {
     if (this.contactCache && now - this.contactCache.fetchedAtMs < CACHE_TTL_MS) {
       return this.contactCache.items;
     }
-
     const data = await this.request<unknown>("/ticketing/contact/contacts", "GET");
     const items = Array.isArray(data) ? (data as unknown[]).filter(isContact) : [];
     this.contactCache = { items, fetchedAtMs: now };
@@ -142,7 +228,6 @@ export class NinjaClient {
   async findOrgsByDomain(domain: string): Promise<NinjaOrganization[]> {
     const contacts = await this.findContactsByDomain(domain);
     if (contacts.length === 0) return [];
-
     const clientIds = [...new Set(contacts.map((c) => c.clientId))];
     const orgs = await this.getOrganizations();
     return orgs.filter((org) => clientIds.includes(org.id));
@@ -151,17 +236,6 @@ export class NinjaClient {
   // ── Technician identity ───────────────────────────────────────────────────
 
   async getTechnicianProfile(): Promise<TechnicianProfile | null> {
-    // Per-session user wins: the person who completed OAuth is the technician
-    // for this request, regardless of TECHNICIAN_EMAIL.
-    const session = this.sessionContext.getStore();
-    if (session?.user?.appUserId && session.user.email) {
-      return {
-        appUserId: session.user.appUserId,
-        email: session.user.email,
-        displayName: session.user.displayName ?? session.user.email
-      };
-    }
-
     if (this.technicianProfile !== undefined) return this.technicianProfile;
     if (!this.config.technicianEmail) {
       this.technicianProfile = null;
@@ -170,7 +244,9 @@ export class NinjaClient {
 
     const users = await this.request<unknown>("/users", "GET");
     const list = Array.isArray(users) ? (users as unknown[]).filter(isUser) : [];
-    const match = list.find((u) => u.email?.toLowerCase() === this.config.technicianEmail!.toLowerCase());
+    const match = list.find(
+      (u) => u.email?.toLowerCase() === this.config.technicianEmail!.toLowerCase()
+    );
 
     if (!match) {
       console.warn(`TECHNICIAN_EMAIL "${this.config.technicianEmail}" not found in NinjaOne users.`);
@@ -189,30 +265,7 @@ export class NinjaClient {
     return this.technicianProfile;
   }
 
-  // Identifies the Ninja user behind an access token, by decoding the JWT and
-  // matching against /v2/users. Used at OAuth callback time so the session
-  // carries the user's appUserId/displayName for comment signing.
-  async identifyUserFromToken(accessToken: string): Promise<{ appUserId?: number; email?: string; displayName?: string } | undefined> {
-    const { decodeJwt, emailFromJwt } = await import("./auth.js");
-    const claims = decodeJwt(accessToken);
-    const email = claims ? emailFromJwt(claims) : undefined;
-    if (!email) return undefined;
-
-    const response = await fetch(`${this.config.ninjaApiBaseUrl}/users`, {
-      headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" }
-    });
-    if (!response.ok) return { email };
-
-    const users = (await response.json()) as unknown;
-    const list = Array.isArray(users) ? (users as unknown[]).filter(isUser) : [];
-    const match = list.find((u) => u.email?.toLowerCase() === email.toLowerCase());
-    if (!match) return { email };
-
-    const displayName = [match.firstName, match.lastName].filter(Boolean).join(" ") || email;
-    return { appUserId: match.id, email, displayName };
-  }
-
-  // ── Ticket forms & boards ─────────────────────────────────────────────────
+  // ── Ticket metadata ───────────────────────────────────────────────────────
 
   async listTicketForms(): Promise<unknown> {
     return this.request<unknown>("/ticketing/ticket-form", "GET");
@@ -233,9 +286,10 @@ export class NinjaClient {
     return items;
   }
 
-  // Accepts a status name ("NEW", "OPEN", custom display name) or a numeric ID.
-  // Returns the statusId as a string, which is what the NinjaOne API expects in
-  // create/update payloads.
+  async listTicketAttributes(): Promise<unknown> {
+    return this.request<unknown>("/ticketing/attributes", "GET");
+  }
+
   private async resolveStatus(status: string | number | undefined): Promise<string | undefined> {
     if (status === undefined || status === null || status === "") return undefined;
     if (typeof status === "number") return String(status);
@@ -246,7 +300,11 @@ export class NinjaClient {
     const match = statuses.find(
       (s) => s.name?.toLowerCase() === wanted || s.displayName?.toLowerCase() === wanted
     );
-    if (!match) throw new Error(`Unknown ticket status '${status}'. Use ninja_list_ticket_statuses to see valid options.`);
+    if (!match) {
+      throw new Error(
+        `Unknown ticket status '${status}'. Use ninja_list_ticket_statuses to see valid options.`
+      );
+    }
     return String(match.statusId);
   }
 
@@ -259,27 +317,59 @@ export class NinjaClient {
   async createTicket(input: CreateTicketInput): Promise<NinjaTicket> {
     const [clientId, requesterUid, technician, statusId] = await Promise.all([
       this.resolveClientId(input),
-      input.requester_email ? this.findContactByEmail(input.requester_email).then((c) => c?.uid) : Promise.resolve(undefined),
+      input.requester_uid
+        ? Promise.resolve(input.requester_uid)
+        : input.requester_email
+          ? this.findContactByEmail(input.requester_email).then((c) => c?.uid)
+          : Promise.resolve(undefined),
       this.getTechnicianProfile(),
       this.resolveStatus(input.status)
     ]);
 
-    const payload = buildCreatePayload(input, clientId, requesterUid, technician, statusId, this.config);
+    const ticketFormId = input.form_id ?? this.config.defaultTicketFormId;
+
+    // NinjaOne ticket-create payload. `clientId` is the documented org field on
+    // the ticket model. `description` is an object containing the first log
+    // entry's body + visibility.
+    const payload: Record<string, unknown> = {
+      clientId,
+      subject: input.summary,
+      description: { body: input.description, public: true }
+    };
+
+    if (ticketFormId) payload.ticketFormId = ticketFormId;
+    if (input.location_id) payload.locationId = input.location_id;
+    if (input.node_id) payload.nodeId = input.node_id;
+    if (input.type) payload.type = input.type;
+    if (input.priority) payload.priority = input.priority;
+    if (input.severity) payload.severity = input.severity;
+    if (statusId) payload.status = statusId;
+    if (requesterUid) payload.requesterUid = requesterUid;
+    if (input.tags?.length) payload.tags = input.tags;
+    if (input.attributes && Object.keys(input.attributes).length > 0) {
+      payload.attributes = input.attributes;
+    }
+    if (input.cc_emails?.length) payload.ccList = { emails: input.cc_emails };
+    const assignee = input.assigned_app_user_id ?? technician?.appUserId;
+    if (assignee !== undefined) payload.assignedAppUserId = assignee;
+
     return this.request<NinjaTicket>("/ticketing/ticket", "POST", payload);
   }
 
   async updateTicket(input: UpdateTicketInput): Promise<NinjaTicket> {
-    const { ticket_id, comment_body, comment_public, ...ticketFields } = input;
-    const technician = await this.getTechnicianProfile();
+    const { ticket_id, comment_body, comment_public, ...fields } = input;
 
     const payload: Record<string, unknown> = {};
-    if (ticketFields.summary !== undefined) payload.subject = ticketFields.summary;
-    if (ticketFields.status !== undefined) payload.status = await this.resolveStatus(ticketFields.status);
-    if (ticketFields.type !== undefined) payload.type = ticketFields.type;
-    if (ticketFields.priority !== undefined) payload.priority = ticketFields.priority;
-    if (ticketFields.severity !== undefined) payload.severity = ticketFields.severity;
-    const assignee = ticketFields.assigned_app_user_id ?? technician?.appUserId;
-    if (assignee !== undefined) payload.assignedAppUserId = assignee;
+    if (fields.summary !== undefined) payload.subject = fields.summary;
+    if (fields.status !== undefined) payload.status = await this.resolveStatus(fields.status);
+    if (fields.type !== undefined) payload.type = fields.type;
+    if (fields.priority !== undefined) payload.priority = fields.priority;
+    if (fields.severity !== undefined) payload.severity = fields.severity;
+    if (fields.assigned_app_user_id !== undefined) payload.assignedAppUserId = fields.assigned_app_user_id;
+    if (fields.tags !== undefined) payload.tags = fields.tags;
+    if (fields.attributes && Object.keys(fields.attributes).length > 0) {
+      payload.attributes = fields.attributes;
+    }
 
     if (Object.keys(payload).length > 0) {
       await this.request<unknown>(`/ticketing/ticket/${ticket_id}`, "PUT", payload);
@@ -292,9 +382,9 @@ export class NinjaClient {
     return this.getTicket(ticket_id);
   }
 
-  // POST /v2/ticketing/ticket/{ticketId}/comment is multipart/form-data and
-  // returns 204 No Content. Re-fetch the ticket so callers still get something
-  // meaningful back.
+  // POST /ticketing/ticket/{ticketId}/comment is multipart/form-data with a
+  // "comment" part containing the JSON body. Returns 204 No Content, so we
+  // re-fetch the ticket to return something meaningful.
   async addComment(ticketId: number, comment: TicketComment): Promise<NinjaTicket> {
     const technician = await this.getTechnicianProfile();
     const commentObj: Record<string, unknown> = {
@@ -315,30 +405,76 @@ export class NinjaClient {
     return this.request<unknown>(`/ticketing/ticket/${ticketId}/log-entry`, "GET");
   }
 
-  async listTicketAttributes(): Promise<unknown> {
-    return this.request<unknown>("/ticketing/attributes", "GET");
-  }
-
   async listTicketsForBoard(boardId: number, pageSize = 100): Promise<unknown> {
     return this.request<unknown>(`/ticketing/trigger/board/${boardId}/run`, "POST", { pageSize });
   }
 
-  // ── Private helpers ───────────────────────────────────────────────────────
+  // ── Devices ───────────────────────────────────────────────────────────────
+
+  async listDevices(opts: { pageSize?: number; organizationId?: number; deviceFilter?: string } = {}): Promise<NinjaDevice[]> {
+    const params = new URLSearchParams();
+    if (opts.pageSize) params.set("pageSize", String(opts.pageSize));
+    if (opts.organizationId) params.set("df", `org = ${opts.organizationId}`);
+    else if (opts.deviceFilter) params.set("df", opts.deviceFilter);
+    const qs = params.toString();
+    const data = await this.request<unknown>(`/devices${qs ? `?${qs}` : ""}`, "GET");
+    return Array.isArray(data) ? (data as NinjaDevice[]) : [];
+  }
+
+  async getDevice(deviceId: number): Promise<NinjaDevice> {
+    return this.request<NinjaDevice>(`/device/${deviceId}`, "GET");
+  }
+
+  async rebootDevice(deviceId: number, mode: "NORMAL" | "FORCED" = "NORMAL", reason?: string): Promise<void> {
+    const params = new URLSearchParams();
+    if (reason) params.set("reason", reason);
+    const qs = params.toString();
+    await this.request<unknown>(
+      `/device/${deviceId}/reboot/${mode}${qs ? `?${qs}` : ""}`,
+      "POST"
+    );
+  }
+
+  async getDeviceActivities(deviceId: number, pageSize = 50): Promise<unknown> {
+    return this.request<unknown>(`/device/${deviceId}/activities?pageSize=${pageSize}`, "GET");
+  }
+
+  // ── Alerts ────────────────────────────────────────────────────────────────
+
+  async listAlerts(opts: { deviceId?: number; sourceType?: string } = {}): Promise<NinjaAlert[]> {
+    const path = opts.deviceId
+      ? `/device/${opts.deviceId}/alerts`
+      : opts.sourceType
+        ? `/alerts/${opts.sourceType}`
+        : "/alerts";
+    const data = await this.request<unknown>(path, "GET");
+    return Array.isArray(data) ? (data as NinjaAlert[]) : [];
+  }
+
+  async resetAlert(alertUid: string): Promise<void> {
+    await this.request<unknown>(`/alert/${alertUid}/reset`, "POST");
+  }
+
+  // ── Private ───────────────────────────────────────────────────────────────
 
   private async resolveClientId(input: CreateTicketInput): Promise<number> {
     if (input.organization_id) return input.organization_id;
 
     if (input.organization_domain) {
       const orgs = await this.findOrgsByDomain(input.organization_domain);
-      if (orgs.length === 0) throw new Error(`No NinjaOne organization found for domain '${input.organization_domain}'.`);
+      if (orgs.length === 0)
+        throw new Error(`No NinjaOne organization found for domain '${input.organization_domain}'.`);
       if (orgs.length === 1) return orgs[0].id;
       const options = orgs.map((o) => `${o.name} (${o.id})`).join(", ");
-      throw new Error(`Multiple organizations share domain '${input.organization_domain}': ${options}. Use organization_id to specify.`);
+      throw new Error(
+        `Multiple organizations share domain '${input.organization_domain}': ${options}. Use organization_id to specify.`
+      );
     }
 
     if (input.organization_name) {
       const matches = await this.findOrganizations(input.organization_name, 5);
-      if (matches.length === 0) throw new Error(`No NinjaOne organization matched '${input.organization_name}'.`);
+      if (matches.length === 0)
+        throw new Error(`No NinjaOne organization matched '${input.organization_name}'.`);
 
       const exactMatches = matches.filter(
         (org) => org.name.toLowerCase() === input.organization_name!.trim().toLowerCase()
@@ -347,98 +483,25 @@ export class NinjaClient {
       if (matches.length === 1) return matches[0].id;
 
       const options = matches.map((org) => `${org.name} (${org.id})`).join(", ");
-      throw new Error(`Multiple organizations matched '${input.organization_name}'. Specify organization_id: ${options}`);
+      throw new Error(
+        `Multiple organizations matched '${input.organization_name}'. Specify organization_id: ${options}`
+      );
     }
 
     throw new Error("Provide organization_id, organization_name, or organization_domain.");
   }
 
-  private async getAccessToken(requireUserContext = false): Promise<string> {
-    const now = Date.now();
-
-    // Per-request session takes precedence. Each session has its own NinjaOne
-    // refresh token, so we don't share token caches across users.
-    const session = this.sessionContext.getStore();
-    if (session) {
-      if (session.ninja_access_token && session.ninja_access_token_expires_at && session.ninja_access_token_expires_at > now + 60_000) {
-        return session.ninja_access_token;
-      }
-      try {
-        const refreshed = await refreshAccessToken(this.config, session.ninja_refresh_token);
-        const expiresIn = refreshed.expires_in ?? 3600;
-        session.ninja_access_token = refreshed.access_token;
-        session.ninja_access_token_expires_at = now + expiresIn * 1000;
-        if (refreshed.refresh_token) session.ninja_refresh_token = refreshed.refresh_token;
-        session.last_used_at = now;
-        await this.sessionStore.putSession(session);
-        return refreshed.access_token;
-      } catch (error) {
-        console.warn("Session refresh token exchange failed:", error);
-        throw new Error(authRequiredMessage(this.config));
-      }
-    }
-
-    if (this.token && this.token.expiresAtMs > now + 60_000) {
-      if (!requireUserContext || this.token.userContext) return this.token.accessToken;
-    }
-
-    const stored = await this.tokenStore.load();
-    if (stored?.refresh_token) {
-      try {
-        const refreshed = await refreshAccessToken(this.config, stored.refresh_token);
-        const expiresInSeconds = refreshed.expires_in ?? 3600;
-        await this.tokenStore.save({
-          refresh_token: refreshed.refresh_token ?? stored.refresh_token,
-          access_token: refreshed.access_token,
-          access_token_expires_at: now + expiresInSeconds * 1000,
-          scope: refreshed.scope ?? stored.scope,
-          obtained_at: now
-        });
-        this.token = {
-          accessToken: refreshed.access_token,
-          expiresAtMs: now + expiresInSeconds * 1000,
-          userContext: true
-        };
-        return this.token.accessToken;
-      } catch (error) {
-        console.warn("NinjaOne refresh token exchange failed, falling back:", error);
-        this.tokenStore.invalidate();
-      }
-    }
-
-    if (requireUserContext) {
-      throw new Error(authRequiredMessage(this.config));
-    }
-
-    // Fallback: client_credentials (machine token, reads-only).
-    const body = new URLSearchParams({
-      grant_type: "client_credentials",
-      client_id: this.config.ninjaClientId,
-      client_secret: this.config.ninjaClientSecret,
-      scope: "monitoring management"
-    });
-    const response = await fetch(this.config.ninjaTokenUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
-      body
-    });
-    if (!response.ok) {
-      throw new Error(`NinjaOne token request failed: ${response.status} ${await safeText(response)}`);
-    }
-    const tokenData = (await response.json()) as NinjaTokenResponse;
-    if (!tokenData.access_token) throw new Error("NinjaOne token response did not include access_token.");
-    const expiresInSeconds = tokenData.expires_in ?? 3600;
-    this.token = {
-      accessToken: tokenData.access_token,
-      expiresAtMs: now + expiresInSeconds * 1000,
-      userContext: false
-    };
-    return this.token.accessToken;
+  async request<T>(path: string, method: "GET" | "POST" | "PUT" | "DELETE", body?: unknown): Promise<T> {
+    return this.requestWithRetry<T>(path, method, body, false);
   }
 
-  async request<T>(path: string, method: "GET" | "POST" | "PUT", body?: unknown): Promise<T> {
-    const isWrite = method !== "GET";
-    const token = await this.getAccessToken(isWrite);
+  private async requestWithRetry<T>(
+    path: string,
+    method: "GET" | "POST" | "PUT" | "DELETE",
+    body: unknown,
+    isRetry: boolean
+  ): Promise<T> {
+    const token = await this.getAccessToken();
     const url = `${this.config.ninjaApiBaseUrl}${path}`;
 
     const response = await fetch(url, {
@@ -451,12 +514,14 @@ export class NinjaClient {
       body: body ? JSON.stringify(body) : undefined
     });
 
+    if (response.status === 401 && !isRetry) {
+      this.invalidateToken();
+      return this.requestWithRetry<T>(path, method, body, true);
+    }
+
     if (!response.ok) {
       const text = await safeText(response);
-      if (response.status === 403 && /user_context_required/i.test(text)) {
-        throw new Error(authRequiredMessage(this.config));
-      }
-      throw new Error(`NinjaOne API error: ${method} ${path} → ${response.status} ${text}`);
+      throw new NinjaApiError(method, path, response.status, text);
     }
 
     if (response.status === 204) return undefined as T;
@@ -464,7 +529,11 @@ export class NinjaClient {
   }
 
   private async requestMultipart(path: string, form: FormData): Promise<void> {
-    const token = await this.getAccessToken(true);
+    return this.requestMultipartWithRetry(path, form, false);
+  }
+
+  private async requestMultipartWithRetry(path: string, form: FormData, isRetry: boolean): Promise<void> {
+    const token = await this.getAccessToken();
     const url = `${this.config.ninjaApiBaseUrl}${path}`;
 
     const response = await fetch(url, {
@@ -473,52 +542,19 @@ export class NinjaClient {
       body: form
     });
 
+    if (response.status === 401 && !isRetry) {
+      this.invalidateToken();
+      return this.requestMultipartWithRetry(path, form, true);
+    }
+
     if (!response.ok) {
       const text = await safeText(response);
-      if (response.status === 403 && /user_context_required/i.test(text)) {
-        throw new Error(authRequiredMessage(this.config));
-      }
-      throw new Error(`NinjaOne API error: POST ${path} → ${response.status} ${text}`);
+      throw new NinjaApiError("POST", path, response.status, text);
     }
   }
 }
 
-function authRequiredMessage(config: AppConfig): string {
-  return `NinjaOne user authentication required for this action. Visit ${loginUrl(config)} in a browser to connect your NinjaOne account, then retry.`;
-}
-
-// ── Payload builders ──────────────────────────────────────────────────────────
-
-function buildCreatePayload(
-  input: CreateTicketInput,
-  clientId: number,
-  requesterUid: string | undefined,
-  technician: TechnicianProfile | null,
-  statusId: string | undefined,
-  config: AppConfig
-): Record<string, unknown> {
-  const ticketFormId = input.form_id ?? config.defaultTicketFormId;
-
-  const payload: Record<string, unknown> = {
-    clientId,
-    subject: input.summary,
-    description: { body: input.description, public: true }
-  };
-
-  if (ticketFormId) payload.ticketFormId = ticketFormId;
-  if (input.type) payload.type = input.type;
-  if (input.priority) payload.priority = input.priority;
-  if (input.severity) payload.severity = input.severity;
-  if (statusId) payload.status = statusId;
-  if (requesterUid) payload.requesterUid = requesterUid;
-  if (input.tags?.length) payload.tags = input.tags;
-  const assignee = input.assigned_app_user_id ?? technician?.appUserId;
-  if (assignee !== undefined) payload.assignedAppUserId = assignee;
-
-  return payload;
-}
-
-// ── Type guards ───────────────────────────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────────────────────
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -529,7 +565,12 @@ function isOrganization(value: unknown): value is NinjaOrganization {
 }
 
 function isContact(value: unknown): value is NinjaContact {
-  return isRecord(value) && typeof value.id === "number" && typeof value.uid === "string" && typeof value.clientId === "number";
+  return (
+    isRecord(value) &&
+    typeof value.id === "number" &&
+    typeof value.uid === "string" &&
+    typeof value.clientId === "number"
+  );
 }
 
 function isUser(value: unknown): value is NinjaUser {
@@ -539,8 +580,6 @@ function isUser(value: unknown): value is NinjaUser {
 function isStatusRecord(value: unknown): value is TicketStatusRecord {
   return isRecord(value) && typeof value.statusId === "number";
 }
-
-// ── Utilities ─────────────────────────────────────────────────────────────────
 
 function scoreOrgMatch(name: string, query: string): number {
   const lower = name.toLowerCase();
@@ -562,5 +601,14 @@ async function safeText(response: Response): Promise<string> {
   }
 }
 
-// Re-export for callers that need the enum types
-export type { TicketPriority, TicketSeverity };
+function tryParseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function stringOrUndef(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
