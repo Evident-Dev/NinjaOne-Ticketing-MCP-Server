@@ -15,7 +15,7 @@ export function registerVulnerabilitiesDomain({ server, ninja }: DomainContext):
       inputSchema: z.object({
         organization_id: z.coerce.number().int().positive().optional(),
         severity: z.enum(["LOW", "MEDIUM", "HIGH", "CRITICAL"]).optional(),
-        page_size: z.number().int().min(1).max(500).default(100)
+        page_size: z.coerce.number().int().min(1).max(500).default(100)
       }).strict(),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
     },

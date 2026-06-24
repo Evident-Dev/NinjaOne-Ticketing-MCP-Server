@@ -12,7 +12,7 @@ export function registerDevicesDomain({ server, ninja, config }: DomainContext):
       description: "List devices, optionally filtered by organization. Read-only.",
       inputSchema: z.object({
         organization_id: z.coerce.number().int().positive().optional(),
-        page_size: z.number().int().min(1).max(1000).default(100),
+        page_size: z.coerce.number().int().min(1).max(1000).default(100),
         device_filter: z.string().optional().describe("Raw NinjaOne device filter (df=) — power users only")
       }).strict(),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
@@ -47,7 +47,7 @@ export function registerDevicesDomain({ server, ninja, config }: DomainContext):
       description: "Recent activity log entries for a device (alerts, jobs, status changes).",
       inputSchema: z.object({
         device_id: z.coerce.number().int().positive(),
-        page_size: z.number().int().min(1).max(500).default(50)
+        page_size: z.coerce.number().int().min(1).max(500).default(50)
       }).strict(),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
     },
@@ -161,8 +161,8 @@ export function registerDevicesDomain({ server, ninja, config }: DomainContext):
         "Place a device into maintenance mode for a duration (suppresses alerts). Pass end_unix_ms; optional start_unix_ms (defaults to now). disabled_features defaults to alerts only.",
       inputSchema: z.object({
         device_id: z.coerce.number().int().positive(),
-        end_unix_ms: z.number().int().positive().describe("Maintenance window end, unix ms"),
-        start_unix_ms: z.number().int().positive().optional().describe("Defaults to now if omitted"),
+        end_unix_ms: z.coerce.number().int().positive().describe("Maintenance window end, unix ms"),
+        start_unix_ms: z.coerce.number().int().positive().optional().describe("Defaults to now if omitted"),
         disabled_features: z
           .array(z.enum(["ALERTS", "PATCHING", "AVSCANS", "TASKS"]))
           .min(1)

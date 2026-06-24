@@ -209,7 +209,7 @@ time_tracked is in seconds and is optional.`,
         ticket_id: z.coerce.number().int().positive(),
         body: z.string().min(1),
         public: z.boolean().optional().default(true),
-        time_tracked: z.number().int().min(0).optional().describe("Time spent in seconds")
+        time_tracked: z.coerce.number().int().min(0).optional().describe("Time spent in seconds")
       }).strict(),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
     },
@@ -241,9 +241,9 @@ Examples:
         ticket_id: z.coerce.number().int().positive(),
         product_id: z.coerce.number().int().positive().optional(),
         description: z.string().min(1).max(500).optional(),
-        hours: z.number().positive().optional(),
-        minutes: z.number().positive().optional(),
-        unit_price: z.number().nonnegative().optional(),
+        hours: z.coerce.number().positive().optional(),
+        minutes: z.coerce.number().positive().optional(),
+        unit_price: z.coerce.number().nonnegative().optional(),
         notes: z.string().max(2000).optional()
       }).strict().refine(
         (v) => v.hours !== undefined || v.minutes !== undefined,
