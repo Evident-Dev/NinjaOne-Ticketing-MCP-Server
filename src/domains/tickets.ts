@@ -223,48 +223,53 @@ time_tracked is in seconds and is optional.`,
     }
   );
 
-  // Convenience: add a billable line item (time or product) to a ticket.
-  // Mirrors ninja_billing_add_ticket_product — shipped here so help-desk techs
-  // working from /mcp/tickets don't need to swap endpoints.
+  // Log billable time on a ticket. NinjaOne records time as a time entry
+  // attached to a ticket comment (timeTracked, in seconds). It applies the
+  // billing defaults server-side: BILLABLE, the ticket's agreement, and the
+  // tech's default labor rate. There is no public-API line-item/product
+  // endpoint — the rate comes from the client's agreement, not a unit price.
   server.registerTool(
     "ninja_ticket_add_billable_time",
     {
       title: "Ticket: Add Billable Time",
-      description: `Log billable time on a ticket as a billing line item. Accepts hours (decimal) or minutes.
+      description: `Log billable time on a ticket. Accepts hours (decimal) or minutes.
 
-Either pass product_id (the configured "Labor" or "Service" product) to use that product's rate, OR pass description + unit_price for a free-form charge.
+The time is recorded as a NinjaOne time entry and billed against the client's ticket agreement automatically (billing: BILLABLE). Rate comes from the agreement/labor rate, so no unit price is needed.
+
+By default the time is logged on a private note; pass public: true to log it on a client-visible reply instead.
 
 Examples:
-- 1.5h at the default labor rate: { ticket_id, product_id: 42, hours: 1.5 }
-- 45 minutes at $125/hr: { ticket_id, description: "Onsite triage", minutes: 45, unit_price: 125 }`,
+- { ticket_id: 1010, minutes: 45, description: "WordPress banner update" }
+- { ticket_id: 1010, hours: 1.5, description: "Onsite triage", public: true }`,
       inputSchema: z.object({
         ticket_id: z.coerce.number().int().positive(),
-        product_id: z.coerce.number().int().positive().optional(),
-        description: z.string().min(1).max(500).optional(),
+        description: z.string().min(1).max(2000).optional(),
         hours: z.coerce.number().positive().optional(),
         minutes: z.coerce.number().positive().optional(),
-        unit_price: z.coerce.number().nonnegative().optional(),
-        notes: z.string().max(2000).optional()
+        public: z.boolean().optional().default(false)
       }).strict().refine(
         (v) => v.hours !== undefined || v.minutes !== undefined,
         { message: "Provide either hours or minutes." }
-      ).refine(
-        (v) => v.product_id || (v.description && v.unit_price !== undefined),
-        { message: "Provide product_id, or description + unit_price." }
       ),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
     },
     async (input) => {
-      const quantity = input.hours ?? (input.minutes ? input.minutes / 60 : 0);
-      const result = await ninja.createTicketProduct({
-        ticketId: input.ticket_id,
-        productId: input.product_id,
-        description: input.description,
-        quantity,
-        unitPrice: input.unit_price,
-        notes: input.notes
+      const hours = input.hours ?? (input.minutes ?? 0) / 60;
+      const seconds = Math.round(hours * 3600);
+      const body = input.description ?? `Billable time: ${hours}h`;
+      await ninja.addComment(input.ticket_id, {
+        body,
+        public: input.public,
+        timeTracked: seconds
       });
-      return jsonResult({ added: true, quantity_hours: quantity, ticket_product: result });
+      return jsonResult({
+        logged: true,
+        ticket_id: input.ticket_id,
+        time_tracked_seconds: seconds,
+        hours,
+        billing: "BILLABLE",
+        agreement: "ticket agreement (applied by NinjaOne)"
+      });
     }
   );
 

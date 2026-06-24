@@ -19,7 +19,7 @@ Each endpoint also ships the **Core Lookup Pack** (`ninja_system_status`, `ninja
 | `/mcp/customers` | Org create + locations | device list, billing read | Account managers, intake |
 | `/mcp/devices` | Get, list, reboot, activities, software, os_patches, disks, volumes, processors, services, last_logged_on_user, maintenance, (gated) delete | alert list | Sysadmins, RMM work |
 | `/mcp/alerts` | List, summary, reset, (gated) reset_all | device read | NOC / monitoring |
-| `/mcp/billing` | Agreements, invoices, products, customer accounts, ticket products, add_ticket_product | ticket read, user lookup | Finance, account managers |
+| `/mcp/billing` | Agreements, invoices, products, customer accounts, ticket time entries | ticket read, user lookup | Finance, account managers |
 | `/mcp/security` | Vulnerabilities (list / get by CVE / by device) | device read | Security triage |
 
 Each slice is self-sufficient — a help-desk tech adding `/mcp/tickets` can also resolve a customer by name, find a device to attach, and pick an assignee, without needing the full `/mcp` surface.
@@ -94,7 +94,7 @@ Now that you have your Railway domain, create the API app in NinjaOne:
      - **Devices:** Read (and Manage if you want reboots, maintenance windows, or `device_delete`)
      - **Organizations:** Read (and Manage if you want to create new orgs from Claude)
      - **Alerts:** Read (and Manage if you want alert reset)
-     - **Billing:** Read (and Manage if you want to add ticket-products)
+     - **Billing:** Read (billing tools are read-only; logging billable time uses Ticketing Manage)
    - Save. Permissions changes are usually immediate but can take a minute to propagate.
 
    > **If ticket creation later returns `403` with `resultCode: user_context_required`, it's almost always a permissions issue here.** The OAuth scope (`management`) authorizes the token; the API permission on the app role authorizes the action.
@@ -237,7 +237,7 @@ curl http://localhost:3000/debug/test-ninja
 | `ninja_ticket_update` | Update any combination of subject/status/priority/severity/type/assignee/tags/attributes; optional `comment_body`. |
 | `ninja_ticket_resolve` | Convenience: set status to RESOLVED, optionally with a final comment. NinjaOne treats CLOSED as terminal-only — use RESOLVED. |
 | `ninja_ticket_add_comment` | Public reply or internal note; optional `time_tracked` in seconds. |
-| `ninja_ticket_add_billable_time` | Log billable time (hours or minutes) on a ticket — wraps `add_ticket_product`. |
+| `ninja_ticket_add_billable_time` | Log billable time (hours or minutes) on a ticket as a NinjaOne time entry (billable, billed against the ticket agreement). |
 | `ninja_ticket_get_log` | Full comment + activity history. |
 | `ninja_ticket_list_for_board` | Tickets on a specific board. |
 | `ninja_ticket_list_forms` / `_boards` / `_statuses` / `_attributes` | Discover ticket metadata. |
@@ -282,10 +282,9 @@ curl http://localhost:3000/debug/test-ninja
 |---|---|
 | `ninja_billing_list_agreements` / `get_agreement` | Contracts. |
 | `ninja_billing_list_invoices` / `get_invoice` | Invoices. |
-| `ninja_billing_list_products` | Product catalogue (use IDs in `add_ticket_product`). |
+| `ninja_billing_list_products` | Product catalogue. |
 | `ninja_billing_list_customer_accounts` | Customer billing accounts. |
-| `ninja_billing_list_ticket_products` | Billable lines already attached to tickets. |
-| `ninja_billing_add_ticket_product` | Attach a billable product/charge to a ticket. |
+| `ninja_billing_list_ticket_time` | Billable time entries logged on a ticket. |
 
 ### Security / Vulnerabilities
 
@@ -386,7 +385,7 @@ src/
     customers.ts       ← org create
     devices.ts         ← device tools (+ detail expanders + maintenance + gated delete)
     alerts.ts          ← alert tools (+ gated reset_all)
-    billing.ts         ← contracts, invoices, products, ticket products
+    billing.ts         ← contracts, invoices, products, ticket time entries
     vulnerabilities.ts ← CVE-based security triage
     users.ts           ← technician lookup
 ```
@@ -394,6 +393,11 @@ src/
 ---
 
 ## Changelog
+
+### 0.9.1
+
+- **Billable time actually works now.** `ninja_ticket_add_billable_time` was calling `/billing/ticket-product`, an endpoint that doesn't exist in NinjaOne's public API (every call 404'd). NinjaOne records billable work as a *time entry* on a ticket comment (`timeTracked`, in seconds), billed against the ticket's agreement automatically. The tool now does that. Removed the dead `ninja_billing_add_ticket_product`; `list_ticket_products` is replaced by `ninja_billing_list_ticket_time`, which reads time entries from the ticket log.
+- **Numeric args coerce.** MCP clients serialize numeric tool arguments as strings; bare `z.number()` fields rejected them. Switched every numeric input to `z.coerce.number()`.
 
 ### 0.9.0
 

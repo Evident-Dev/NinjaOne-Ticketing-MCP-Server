@@ -733,32 +733,6 @@ export class NinjaClient {
     return this.request<unknown>(`/billing/customer-accounts`, "GET");
   }
 
-  async listTicketProducts(ticketId?: number): Promise<unknown> {
-    const qs = ticketId ? `?ticketId=${ticketId}` : "";
-    return this.request<unknown>(`/billing/ticket-products${qs}`, "GET");
-  }
-
-  async createTicketProduct(input: {
-    ticketId: number;
-    productId?: number;
-    description?: string;
-    quantity?: number;
-    unitPrice?: number;
-    discountAmount?: number;
-    discountPercent?: number;
-    notes?: string;
-  }): Promise<unknown> {
-    const payload: Record<string, unknown> = { ticketId: input.ticketId };
-    if (input.productId !== undefined) payload.productId = input.productId;
-    if (input.description !== undefined) payload.description = input.description;
-    if (input.quantity !== undefined) payload.quantity = input.quantity;
-    if (input.unitPrice !== undefined) payload.unitPrice = input.unitPrice;
-    if (input.discountAmount !== undefined) payload.discountAmount = input.discountAmount;
-    if (input.discountPercent !== undefined) payload.discountPercent = input.discountPercent;
-    if (input.notes !== undefined) payload.notes = input.notes;
-    return this.request<unknown>(`/billing/ticket-product`, "POST", payload);
-  }
-
   // ── Vulnerability management ─────────────────────────────────────────────
 
   async listVulnerabilities(opts: {
