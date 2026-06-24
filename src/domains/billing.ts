@@ -1,7 +1,7 @@
 // Billing domain — contracts (agreements), invoices, products, customer
-// accounts, and ticket-products (billable time on a ticket). Read-only for
-// 0.9.0 except for add_ticket_product, which is the workflow win that closes
-// the time-tracking → invoice loop.
+// accounts, and ticket time entries. Read-only; billable time is logged via
+// ninja_ticket_add_billable_time (a time entry on a ticket comment), which is
+// the only write path NinjaOne's public API exposes for ticket billing.
 
 import { z } from "zod";
 import { jsonResult, type DomainContext } from "./common.js";
@@ -66,7 +66,7 @@ export function registerBillingDomain({ server, ninja }: DomainContext): void {
     "ninja_billing_list_products",
     {
       title: "Billing: List Products",
-      description: "List billable products defined in NinjaOne. Use the returned product IDs with ninja_billing_add_ticket_product.",
+      description: "List billable products defined in NinjaOne. Read-only.",
       inputSchema: z.object({}).strict(),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
     },
@@ -74,14 +74,41 @@ export function registerBillingDomain({ server, ninja }: DomainContext): void {
   );
 
   server.registerTool(
-    "ninja_billing_list_customer_accounts",
+    "ninja_billing_list_accounts",
     {
-      title: "Billing: List Customer Accounts",
-      description: "List customer billing accounts (the receivables side of an organization).",
+      title: "Billing: List Accounts",
+      description: "List billing accounts (e.g. Ticket Time Entry, Managed Services) used to categorize charges. The account id is required when adding a ticket product. Read-only.",
       inputSchema: z.object({}).strict(),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
     },
-    async () => jsonResult(await ninja.listCustomerAccounts())
+    async () => jsonResult(await ninja.listBillingAccounts())
+  );
+
+  server.registerTool(
+    "ninja_billing_list_ticket_time",
+    {
+      title: "Billing: List Ticket Time Entries",
+      description:
+        "List billable time entries logged on a ticket (the time tracked by ninja_ticket_add_billable_time). Shows seconds tracked, billing status, and the agreement each entry bills against. Read-only.",
+      inputSchema: z.object({
+        ticket_id: z.coerce.number().int().positive()
+      }).strict(),
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+    },
+    async ({ ticket_id }) => {
+      const log = await ninja.listTicketLogEntries(ticket_id);
+      const entries = Array.isArray(log) ? log : [];
+      const timeEntries = entries
+        .filter((e): e is Record<string, unknown> => !!e && typeof e === "object" && (e as Record<string, unknown>).ticketTimeEntry != null)
+        .map((e) => ({
+          log_entry_id: e.id,
+          create_time: e.createTime,
+          body: e.body,
+          time_tracked_seconds: e.timeTracked,
+          time_entry: e.ticketTimeEntry
+        }));
+      return jsonResult({ ticket_id, count: timeEntries.length, time_entries: timeEntries });
+    }
   );
 
   server.registerTool(
@@ -89,9 +116,9 @@ export function registerBillingDomain({ server, ninja }: DomainContext): void {
     {
       title: "Billing: List Ticket Products",
       description:
-        "List billable line items attached to tickets. Pass ticket_id to filter to one ticket. Use to see what's already been billed before adding more.",
+        "List billable product line items attached to a ticket (parts, fixed charges, etc.). Distinct from time entries — use ninja_billing_list_ticket_time for logged labor. Read-only.",
       inputSchema: z.object({
-        ticket_id: z.coerce.number().int().positive().optional()
+        ticket_id: z.coerce.number().int().positive()
       }).strict(),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
     },
@@ -101,41 +128,38 @@ export function registerBillingDomain({ server, ninja }: DomainContext): void {
   server.registerTool(
     "ninja_billing_add_ticket_product",
     {
-      title: "Billing: Add Billable Product/Time to Ticket",
-      description: `Attach a billable line item to a ticket — used to log billable hours or charge for a product.
+      title: "Billing: Add Ticket Product (line item)",
+      description: `Add a free-form billable line item (a part, fixed charge, etc.) to a ticket — NOT for logging labor time (use ninja_ticket_add_billable_time for that).
 
-Provide either:
-- product_id (with optional quantity/unit_price override), OR
-- description + quantity + unit_price (free-form line item)
+Requires account_id from ninja_billing_list_accounts (e.g. Hardware, Software). Billing defaults to BILLABLE. The ticket's client must have a billing agreement, or NinjaOne rejects it with "agreement_is_required".
 
-Returns the created ticket-product record.`,
+Example: { ticket_id: 1010, account_id: 2, name: "Replacement SSD", quantity: 1, price: 120 }`,
       inputSchema: z.object({
         ticket_id: z.coerce.number().int().positive(),
-        product_id: z.coerce.number().int().positive().optional(),
-        description: z.string().min(1).max(500).optional(),
-        quantity: z.coerce.number().positive().optional(),
-        unit_price: z.coerce.number().nonnegative().optional(),
-        discount_amount: z.coerce.number().nonnegative().optional(),
-        discount_percent: z.coerce.number().min(0).max(100).optional(),
-        notes: z.string().max(2000).optional()
-      }).strict().refine(
-        (v) => v.product_id || (v.description && v.quantity !== undefined && v.unit_price !== undefined),
-        { message: "Provide product_id, or all of description + quantity + unit_price." }
-      ),
+        account_id: z.coerce.number().int().positive().describe("Billing account id from ninja_billing_list_accounts"),
+        name: z.string().min(1).max(200),
+        description: z.string().max(500).optional(),
+        quantity: z.coerce.number().positive(),
+        price: z.coerce.number().nonnegative().describe("Unit price charged to the client"),
+        cost: z.coerce.number().nonnegative().optional().describe("Your unit cost, for margin reporting"),
+        billable: z.boolean().optional().default(true),
+        taxable: z.boolean().optional().default(false)
+      }).strict(),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
     },
     async (input) =>
       jsonResult({
         added: true,
-        ticket_product: await ninja.createTicketProduct({
+        ticket_product: await ninja.createAdhocTicketProduct({
           ticketId: input.ticket_id,
-          productId: input.product_id,
+          accountId: input.account_id,
+          name: input.name,
           description: input.description,
           quantity: input.quantity,
-          unitPrice: input.unit_price,
-          discountAmount: input.discount_amount,
-          discountPercent: input.discount_percent,
-          notes: input.notes
+          price: input.price,
+          cost: input.cost,
+          billable: input.billable,
+          taxable: input.taxable
         })
       })
   );
