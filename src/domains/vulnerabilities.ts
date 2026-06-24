@@ -1,57 +1,52 @@
-// Vulnerability management — read-only security-triage tools.
-// Powers prompts like "show me critical vulns across all customers" or
-// "what CVEs is this server exposed to."
+// Vulnerability management — scan groups. NinjaOne's public API exposes
+// vulnerability data as scan groups: batches of third-party scanner results
+// uploaded as CSV. There is no per-CVE or per-device vulnerability read, so
+// these tools manage the scan groups themselves.
 
 import { z } from "zod";
 import { jsonResult, type DomainContext } from "./common.js";
 
 export function registerVulnerabilitiesDomain({ server, ninja }: DomainContext): void {
   server.registerTool(
-    "ninja_vuln_list",
+    "ninja_scangroup_list",
     {
-      title: "Vulnerability: List",
+      title: "Vulnerability: List Scan Groups",
       description:
-        "List vulnerabilities currently detected in the environment. Optionally scope to a single organization and/or severity. Use ninja_org_find first if you only have the customer's name.",
-      inputSchema: z.object({
-        organization_id: z.coerce.number().int().positive().optional(),
-        severity: z.enum(["LOW", "MEDIUM", "HIGH", "CRITICAL"]).optional(),
-        page_size: z.coerce.number().int().min(1).max(500).default(100)
-      }).strict(),
+        "List vulnerability scan groups — uploaded batches of third-party scanner results. Shows each group's name, vendor, status, and records processed. Read-only.",
+      inputSchema: z.object({}).strict(),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
     },
-    async ({ organization_id, severity, page_size }) =>
-      jsonResult(
-        await ninja.listVulnerabilities({
-          organizationId: organization_id,
-          severity,
-          pageSize: page_size
-        })
-      )
+    async () => jsonResult(await ninja.listScanGroups())
   );
 
   server.registerTool(
-    "ninja_vuln_get",
+    "ninja_scangroup_get",
     {
-      title: "Vulnerability: Get by CVE",
-      description: "Look up a specific vulnerability by CVE identifier (e.g. CVE-2024-12345).",
+      title: "Vulnerability: Get Scan Group",
+      description: "Retrieve a single vulnerability scan group by ID, including its status and CSV-mapping configuration.",
       inputSchema: z.object({
-        cve: z.string().min(4).describe("CVE identifier, e.g. CVE-2024-12345")
+        scan_group_id: z.coerce.number().int().positive()
       }).strict(),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
     },
-    async ({ cve }) => jsonResult(await ninja.getVulnerability(cve))
+    async ({ scan_group_id }) => jsonResult(await ninja.getScanGroup(scan_group_id))
   );
 
   server.registerTool(
-    "ninja_vuln_list_for_device",
+    "ninja_scangroup_upload_csv",
     {
-      title: "Vulnerability: List for Device",
-      description: "List vulnerabilities detected on a specific device.",
+      title: "Vulnerability: Upload Scan CSV",
+      description:
+        "Upload a CSV of third-party scanner results to a scan group. The CSV columns must match the group's configured device and CVE header mapping (see ninja_scangroup_get).",
       inputSchema: z.object({
-        device_id: z.coerce.number().int().positive()
+        scan_group_id: z.coerce.number().int().positive(),
+        csv: z.string().min(1).describe("Raw CSV content of the scan results")
       }).strict(),
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
     },
-    async ({ device_id }) => jsonResult(await ninja.listDeviceVulnerabilities(device_id))
+    async ({ scan_group_id, csv }) => {
+      await ninja.uploadScanGroupCsv(scan_group_id, csv);
+      return jsonResult({ uploaded: true, scan_group: await ninja.getScanGroup(scan_group_id) });
+    }
   );
 }

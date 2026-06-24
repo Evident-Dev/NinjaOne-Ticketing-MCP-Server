@@ -199,14 +199,14 @@ export function registerDevicesDomain({ server, ninja, config }: DomainContext):
   // ── Destructive: gated by NINJA_ALLOW_DESTRUCTIVE=device_delete ──────────
   if (isCapabilityAllowed(config, "device_delete")) {
     server.registerTool(
-      "ninja_device_delete",
+      "ninja_device_decommission",
       {
-        title: "Device: DELETE (permanent)",
+        title: "Device: DECOMMISSION",
         description:
-          "Permanently remove a device from NinjaOne. IRREVERSIBLE. Requires confirm=\"DELETE\" — the user must say this word themselves; never auto-fill. Strongly recommend running with dry_run=true first.",
+          "Decommission a managed device in NinjaOne. The public API has no hard-delete for managed devices; decommission is the equivalent. Destructive — requires confirm=\"DECOMMISSION\", which the user must say themselves; never auto-fill. Strongly recommend running with dry_run=true first.",
         inputSchema: z.object({
           device_id: z.coerce.number().int().positive(),
-          confirm: confirmField("DELETE", "permanent device removal"),
+          confirm: confirmField("DECOMMISSION", "device decommission"),
           dry_run: dryRunField
         }).strict(),
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
@@ -215,7 +215,7 @@ export function registerDevicesDomain({ server, ninja, config }: DomainContext):
         const target = await ninja.getDevice(device_id);
         if (dry_run) {
           return jsonResult(
-            dryRunPreview(`DELETE /device/${device_id}`, { device_id }, {
+            dryRunPreview(`POST /device/${device_id}/decommission`, { device_id }, {
               device_id,
               system_name: target.systemName,
               display_name: target.displayName,
@@ -223,8 +223,8 @@ export function registerDevicesDomain({ server, ninja, config }: DomainContext):
             })
           );
         }
-        await ninja.deleteDevice(device_id);
-        return jsonResult({ deleted: true, device_id, deleted_device: target });
+        await ninja.decommissionDevice(device_id);
+        return jsonResult({ decommissioned: true, device_id, device: target });
       }
     );
   }

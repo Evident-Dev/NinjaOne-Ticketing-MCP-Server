@@ -15,12 +15,12 @@ Each endpoint also ships the **Core Lookup Pack** (`ninja_system_status`, `ninja
 | URL | Domain-specific tools added | Cross-domain helpers included | Use for |
 |---|---|---|---|
 | `/mcp` | Everything | — | Power users, scripted workflows |
-| `/mcp/tickets` | Ticket CRUD + comment + resolve + add_billable_time + (gated) delete + list forms/boards/statuses/attributes | user lookup, device read | Help-desk techs |
+| `/mcp/tickets` | Ticket CRUD + comment + resolve + add_billable_time + list forms/boards/statuses/attributes | user lookup, device read | Help-desk techs |
 | `/mcp/customers` | Org create + locations | device list, billing read | Account managers, intake |
-| `/mcp/devices` | Get, list, reboot, activities, software, os_patches, disks, volumes, processors, services, last_logged_on_user, maintenance, (gated) delete | alert list | Sysadmins, RMM work |
-| `/mcp/alerts` | List, summary, reset, (gated) reset_all | device read | NOC / monitoring |
-| `/mcp/billing` | Agreements, invoices, products, customer accounts, ticket time entries | ticket read, user lookup | Finance, account managers |
-| `/mcp/security` | Vulnerabilities (list / get by CVE / by device) | device read | Security triage |
+| `/mcp/devices` | Get, list, reboot, activities, software, os_patches, disks, volumes, processors, services, last_logged_on_user, maintenance, (gated) decommission | alert list | Sysadmins, RMM work |
+| `/mcp/alerts` | List, summary, reset | device read | NOC / monitoring |
+| `/mcp/billing` | Agreements, invoices, products, accounts, ticket time entries + products | ticket read, user lookup | Finance, account managers |
+| `/mcp/security` | Vulnerability scan groups (list / get / upload CSV) | device read | Security triage |
 
 Each slice is self-sufficient — a help-desk tech adding `/mcp/tickets` can also resolve a customer by name, find a device to attach, and pick an assignee, without needing the full `/mcp` surface.
 
@@ -241,7 +241,6 @@ curl http://localhost:3000/debug/test-ninja
 | `ninja_ticket_get_log` | Full comment + activity history. |
 | `ninja_ticket_list_for_board` | Tickets on a specific board. |
 | `ninja_ticket_list_forms` / `_boards` / `_statuses` / `_attributes` | Discover ticket metadata. |
-| `ninja_ticket_delete` *(gated by `ticket_delete`)* | Permanent delete with confirm token + dry-run. |
 
 ### Customers
 
@@ -265,7 +264,7 @@ curl http://localhost:3000/debug/test-ninja
 | `ninja_device_last_logged_on_user` | Most recent interactive login. |
 | `ninja_device_reboot` | Schedule reboot (`NORMAL` or `FORCED`). |
 | `ninja_device_set_maintenance` / `_clear_maintenance` | Suppress alerts during a work window. |
-| `ninja_device_delete` *(gated by `device_delete`)* | Permanent delete with confirm token + dry-run. |
+| `ninja_device_decommission` *(gated by `device_delete`)* | Decommission a managed device, with confirm token + dry-run. |
 
 ### Alerts
 
@@ -274,7 +273,6 @@ curl http://localhost:3000/debug/test-ninja
 | `ninja_alert_list` | All active alerts; optional `device_id` or `source_type`. |
 | `ninja_alert_summary` | Count grouped by severity. |
 | `ninja_alert_reset` | Dismiss a single alert by UID. |
-| `ninja_alert_reset_all` *(gated by `alert_reset_all`)* | Bulk reset by source type, with confirm token + dry-run. |
 
 ### Billing
 
@@ -283,16 +281,18 @@ curl http://localhost:3000/debug/test-ninja
 | `ninja_billing_list_agreements` / `get_agreement` | Contracts. |
 | `ninja_billing_list_invoices` / `get_invoice` | Invoices. |
 | `ninja_billing_list_products` | Product catalogue. |
-| `ninja_billing_list_customer_accounts` | Customer billing accounts. |
+| `ninja_billing_list_accounts` | Billing accounts (needed as `account_id` when adding a ticket product). |
 | `ninja_billing_list_ticket_time` | Billable time entries logged on a ticket. |
+| `ninja_billing_list_ticket_products` | Product line items attached to a ticket. |
+| `ninja_billing_add_ticket_product` | Add a free-form billable line item (part/charge) to a ticket. |
 
 ### Security / Vulnerabilities
 
 | Tool | Purpose |
 |---|---|
-| `ninja_vuln_list` | List vulnerabilities; optional org + severity filter. |
-| `ninja_vuln_get` | Get by CVE identifier. |
-| `ninja_vuln_list_for_device` | Per-device exposure. |
+| `ninja_scangroup_list` | List vulnerability scan groups (uploaded scanner-result batches). |
+| `ninja_scangroup_get` | Get a scan group by ID. |
+| `ninja_scangroup_upload_csv` | Upload a CSV of scanner results to a scan group. |
 
 ### Users (technicians)
 
@@ -350,8 +350,8 @@ Double-check that your API app's allowed scopes include `management` (not just `
 **`Multiple organizations matched 'Acme'`**
 The org name is ambiguous. Use `ninja_org_find` to see options and call `ninja_ticket_create` with the explicit `organization_id`.
 
-**A destructive tool (e.g. `ninja_ticket_delete`) isn't appearing in Claude**
-By design — destructive tools are only registered when their capability key is in `NINJA_ALLOW_DESTRUCTIVE`. Add the key (e.g. `ticket_delete`) to the env var and redeploy. Check `/health` — it echoes `destructive_allowlist` so you can confirm it took effect.
+**A destructive tool (e.g. `ninja_device_decommission`) isn't appearing in Claude**
+By design — destructive tools are only registered when their capability key is in `NINJA_ALLOW_DESTRUCTIVE`. Add the key (e.g. `device_delete`) to the env var and redeploy. Check `/health` — it echoes `destructive_allowlist` so you can confirm it took effect.
 
 **Whitelabel / partner instance**
 If your NinjaOne hostname isn't on the regional list, leave `NINJA_REGION` unset and set `NINJA_BASE_URL` (e.g. `https://something.rmmservices.net`) — token and API URLs are derived from it.
@@ -396,8 +396,15 @@ src/
 
 ### 0.9.1
 
-- **Billable time actually works now.** `ninja_ticket_add_billable_time` was calling `/billing/ticket-product`, an endpoint that doesn't exist in NinjaOne's public API (every call 404'd). NinjaOne records billable work as a *time entry* on a ticket comment (`timeTracked`, in seconds), billed against the ticket's agreement automatically. The tool now does that. Removed the dead `ninja_billing_add_ticket_product`; `list_ticket_products` is replaced by `ninja_billing_list_ticket_time`, which reads time entries from the ticket log.
-- **Numeric args coerce.** MCP clients serialize numeric tool arguments as strings; bare `z.number()` fields rejected them. Switched every numeric input to `z.coerce.number()`.
+Audit of every endpoint against the tenant's own OpenAPI spec, correcting paths that 404'd:
+
+- **Billable time.** `ninja_ticket_add_billable_time` now logs a NinjaOne *time entry* on a ticket comment (`timeTracked`, seconds), billed `BILLABLE` against the ticket's agreement automatically — the "Edit time → Use ticket agreement" workflow. (It previously POSTed to a non-existent endpoint.)
+- **Ticket products.** Corrected paths: list is `GET /billing/ticket-products/ticket/{id}` (`ninja_billing_list_ticket_products`), create is `POST /billing/ticket-products/adhoc` (`ninja_billing_add_ticket_product`, free-form line items — requires `account_id` from the new `ninja_billing_list_accounts`). Added `ninja_billing_list_ticket_time` to read logged time from the ticket log.
+- **Billing path fixes.** `get_agreement` → `/billing/agreements/{id}`, `get_invoice` → `/billing/invoices/{id}`, and `list_customer_accounts` → `ninja_billing_list_accounts` (`/billing/accounts`). All three were calling singular/renamed routes that 404'd.
+- **Alerts.** Source-type filter now uses `/alerts?sourceType=` (was a path segment that 404'd). Removed `ninja_alert_reset_all` — the API has no bulk-reset endpoint.
+- **Vulnerabilities.** The API exposes no per-CVE/per-device vuln reads, only scan groups. Replaced `ninja_vuln_*` with `ninja_scangroup_list` / `_get` / `_upload_csv`.
+- **Device removal.** Replaced `ninja_device_delete` with `ninja_device_decommission` (`POST /device/{id}/decommission`) — the API has no managed-device hard-delete. Removed `ninja_ticket_delete` (no such endpoint).
+- **Numeric args coerce.** MCP clients serialize numeric tool arguments as strings; switched every numeric input to `z.coerce.number()`.
 
 ### 0.9.0
 
@@ -410,7 +417,7 @@ src/
 - **Cross-domain helpers per endpoint.** `/mcp/tickets` now includes user + device lookup. `/mcp/customers` includes devices + billing. Each slice is self-sufficient.
 - **Destructive-op guardrails.** Four-layer framework:
   - **Allowlist (`NINJA_ALLOW_DESTRUCTIVE`).** Destructive tools whose capability key isn't in this CSV are not registered — Claude literally can't see them.
-  - **Confirm token.** `ninja_ticket_delete` / `ninja_device_delete` / `ninja_alert_reset_all` require the user to type `DELETE` / `RESET` themselves.
+  - **Confirm token.** `ninja_device_decommission` requires the user to type `DECOMMISSION` themselves.
   - **Dry-run.** Every gated tool accepts `dry_run: true` to preview the target + payload without acting.
   - **Audit log.** A new Postgres `audit_log` table records every non-GET request.
 - **Better error surfacing.** `NinjaApiError` parses `resultCode` + `errorMessage` from NinjaOne JSON bodies.

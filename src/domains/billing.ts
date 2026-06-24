@@ -74,14 +74,14 @@ export function registerBillingDomain({ server, ninja }: DomainContext): void {
   );
 
   server.registerTool(
-    "ninja_billing_list_customer_accounts",
+    "ninja_billing_list_accounts",
     {
-      title: "Billing: List Customer Accounts",
-      description: "List customer billing accounts (the receivables side of an organization).",
+      title: "Billing: List Accounts",
+      description: "List billing accounts (e.g. Ticket Time Entry, Managed Services) used to categorize charges. The account id is required when adding a ticket product. Read-only.",
       inputSchema: z.object({}).strict(),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
     },
-    async () => jsonResult(await ninja.listCustomerAccounts())
+    async () => jsonResult(await ninja.listBillingAccounts())
   );
 
   server.registerTool(
@@ -109,5 +109,58 @@ export function registerBillingDomain({ server, ninja }: DomainContext): void {
         }));
       return jsonResult({ ticket_id, count: timeEntries.length, time_entries: timeEntries });
     }
+  );
+
+  server.registerTool(
+    "ninja_billing_list_ticket_products",
+    {
+      title: "Billing: List Ticket Products",
+      description:
+        "List billable product line items attached to a ticket (parts, fixed charges, etc.). Distinct from time entries — use ninja_billing_list_ticket_time for logged labor. Read-only.",
+      inputSchema: z.object({
+        ticket_id: z.coerce.number().int().positive()
+      }).strict(),
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+    },
+    async ({ ticket_id }) => jsonResult(await ninja.listTicketProducts(ticket_id))
+  );
+
+  server.registerTool(
+    "ninja_billing_add_ticket_product",
+    {
+      title: "Billing: Add Ticket Product (line item)",
+      description: `Add a free-form billable line item (a part, fixed charge, etc.) to a ticket — NOT for logging labor time (use ninja_ticket_add_billable_time for that).
+
+Requires account_id from ninja_billing_list_accounts (e.g. Hardware, Software). Billing defaults to BILLABLE. The ticket's client must have a billing agreement, or NinjaOne rejects it with "agreement_is_required".
+
+Example: { ticket_id: 1010, account_id: 2, name: "Replacement SSD", quantity: 1, price: 120 }`,
+      inputSchema: z.object({
+        ticket_id: z.coerce.number().int().positive(),
+        account_id: z.coerce.number().int().positive().describe("Billing account id from ninja_billing_list_accounts"),
+        name: z.string().min(1).max(200),
+        description: z.string().max(500).optional(),
+        quantity: z.coerce.number().positive(),
+        price: z.coerce.number().nonnegative().describe("Unit price charged to the client"),
+        cost: z.coerce.number().nonnegative().optional().describe("Your unit cost, for margin reporting"),
+        billable: z.boolean().optional().default(true),
+        taxable: z.boolean().optional().default(false)
+      }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
+    },
+    async (input) =>
+      jsonResult({
+        added: true,
+        ticket_product: await ninja.createAdhocTicketProduct({
+          ticketId: input.ticket_id,
+          accountId: input.account_id,
+          name: input.name,
+          description: input.description,
+          quantity: input.quantity,
+          price: input.price,
+          cost: input.cost,
+          billable: input.billable,
+          taxable: input.taxable
+        })
+      })
   );
 }

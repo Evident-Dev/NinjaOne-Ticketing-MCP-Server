@@ -620,23 +620,20 @@ export class NinjaClient {
   // ── Alerts ────────────────────────────────────────────────────────────────
 
   async listAlerts(opts: { deviceId?: number; sourceType?: string } = {}): Promise<NinjaAlert[]> {
-    const path = opts.deviceId
-      ? `/device/${opts.deviceId}/alerts`
-      : opts.sourceType
-        ? `/alerts/${opts.sourceType}`
-        : "/alerts";
+    let path: string;
+    if (opts.deviceId) {
+      path = `/device/${opts.deviceId}/alerts`;
+    } else if (opts.sourceType) {
+      path = `/alerts?sourceType=${encodeURIComponent(opts.sourceType)}`;
+    } else {
+      path = "/alerts";
+    }
     const data = await this.request<unknown>(path, "GET");
     return Array.isArray(data) ? (data as NinjaAlert[]) : [];
   }
 
   async resetAlert(alertUid: string): Promise<void> {
     await this.request<unknown>(`/alert/${alertUid}/reset`, "POST");
-  }
-
-  // Bulk-reset alerts for a source type. Destructive — guardrail-gated at the
-  // tool layer.
-  async resetAlertsBySource(sourceType: string): Promise<void> {
-    await this.request<unknown>(`/alerts/${encodeURIComponent(sourceType)}/reset`, "POST");
   }
 
   // ── Device detail (Tier 1 expanders) ─────────────────────────────────────
@@ -682,16 +679,11 @@ export class NinjaClient {
     await this.request<unknown>(`/device/${deviceId}/maintenance`, "DELETE");
   }
 
-  /** Destructive — gated at the tool layer. */
-  async deleteDevice(deviceId: number): Promise<void> {
-    await this.request<unknown>(`/device/${deviceId}`, "DELETE");
-  }
-
-  // ── Ticket destructive ───────────────────────────────────────────────────
-
-  /** Destructive — gated at the tool layer. */
-  async deleteTicket(ticketId: number): Promise<void> {
-    await this.request<unknown>(`/ticketing/ticket/${ticketId}`, "DELETE");
+  // Decommission a managed device. The public API has no hard-delete for
+  // managed devices — decommission is the closest equivalent. Destructive,
+  // gated at the tool layer.
+  async decommissionDevice(deviceId: number): Promise<void> {
+    await this.request<unknown>(`/device/${deviceId}/decommission`, "POST");
   }
 
   // ── Users (technician listing) ───────────────────────────────────────────
@@ -710,7 +702,7 @@ export class NinjaClient {
   }
 
   async getAgreement(agreementId: number): Promise<unknown> {
-    return this.request<unknown>(`/billing/agreement/${agreementId}`, "GET");
+    return this.request<unknown>(`/billing/agreements/${agreementId}`, "GET");
   }
 
   async listInvoices(opts: { organizationId?: number; status?: string } = {}): Promise<unknown> {
@@ -722,38 +714,79 @@ export class NinjaClient {
   }
 
   async getInvoice(invoiceId: number): Promise<unknown> {
-    return this.request<unknown>(`/billing/invoice/${invoiceId}`, "GET");
+    return this.request<unknown>(`/billing/invoices/${invoiceId}`, "GET");
   }
 
   async listBillingProducts(): Promise<unknown> {
     return this.request<unknown>(`/billing/products`, "GET");
   }
 
-  async listCustomerAccounts(): Promise<unknown> {
-    return this.request<unknown>(`/billing/customer-accounts`, "GET");
+  async listBillingAccounts(): Promise<unknown> {
+    return this.request<unknown>(`/billing/accounts`, "GET");
   }
 
-  // ── Vulnerability management ─────────────────────────────────────────────
-
-  async listVulnerabilities(opts: {
-    organizationId?: number;
-    severity?: string;
-    pageSize?: number;
-  } = {}): Promise<unknown> {
-    const params = new URLSearchParams();
-    if (opts.organizationId) params.set("clientId", String(opts.organizationId));
-    if (opts.severity) params.set("severity", opts.severity);
-    if (opts.pageSize) params.set("pageSize", String(opts.pageSize));
-    const qs = params.toString();
-    return this.request<unknown>(`/vulnerabilities${qs ? `?${qs}` : ""}`, "GET");
+  async listTicketProducts(ticketId: number): Promise<unknown> {
+    return this.request<unknown>(`/billing/ticket-products/ticket/${ticketId}`, "GET");
   }
 
-  async getVulnerability(cve: string): Promise<unknown> {
-    return this.request<unknown>(`/vulnerability/${encodeURIComponent(cve)}`, "GET");
+  // Create a free-form (adhoc) billable line item on a ticket. NinjaOne nests
+  // the money fields under `content`; billing/agreement come from those, not a
+  // top-level unit price.
+  async createAdhocTicketProduct(input: {
+    ticketId: number;
+    accountId: number;
+    name: string;
+    description?: string;
+    quantity: number;
+    price: number;
+    cost?: number;
+    billable?: boolean;
+    taxable?: boolean;
+  }): Promise<unknown> {
+    const payload = {
+      name: input.name,
+      description: input.description ?? "",
+      quantityType: "MANUAL",
+      content: {
+        cost: input.cost ?? 0,
+        price: input.price,
+        billing: input.billable === false ? "NON_BILLABLE" : "BILLABLE",
+        taxable: input.taxable ?? false,
+        quantity: input.quantity,
+        productIds: []
+      },
+      ticketId: input.ticketId,
+      productId: null,
+      productUserRole: null,
+      integrationSettings: {
+        inheritTaxRateFromAgreement: true,
+        inheritAccountCodeFromProductType: true,
+        taxRate: null,
+        accountCode: null
+      },
+      accountId: input.accountId,
+      group: false
+    };
+    return this.request<unknown>(`/billing/ticket-products/adhoc`, "POST", payload);
   }
 
-  async listDeviceVulnerabilities(deviceId: number): Promise<unknown> {
-    return this.request<unknown>(`/device/${deviceId}/vulnerabilities`, "GET");
+  // ── Vulnerability management (scan groups) ───────────────────────────────
+  // The public API exposes vulnerability data only as scan groups — batches of
+  // third-party scanner results uploaded as CSV. There is no per-CVE or
+  // per-device vulnerability listing endpoint.
+
+  async listScanGroups(): Promise<unknown> {
+    return this.request<unknown>(`/vulnerability/scan-groups`, "GET");
+  }
+
+  async getScanGroup(scanGroupId: number): Promise<unknown> {
+    return this.request<unknown>(`/vulnerability/scan-groups/${scanGroupId}`, "GET");
+  }
+
+  async uploadScanGroupCsv(scanGroupId: number, csv: string): Promise<void> {
+    const form = new FormData();
+    form.append("csv", new Blob([csv], { type: "text/csv" }), "scan.csv");
+    await this.requestMultipart(`/vulnerability/scan-groups/${scanGroupId}/upload`, form);
   }
 
   // ── Private ───────────────────────────────────────────────────────────────

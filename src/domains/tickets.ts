@@ -1,8 +1,6 @@
 import { z } from "zod";
 import { jsonResult, type DomainContext } from "./common.js";
-import { confirmField, dryRunField, dryRunPreview, isCapabilityAllowed } from "../guardrails.js";
-
-export function registerTicketsDomain({ server, ninja, config }: DomainContext): void {
+export function registerTicketsDomain({ server, ninja }: DomainContext): void {
   // ── Ticketing metadata ─────────────────────────────────────────────────────
 
   server.registerTool(
@@ -273,35 +271,4 @@ Examples:
     }
   );
 
-  // ── Destructive: gated by NINJA_ALLOW_DESTRUCTIVE=ticket_delete ──────────
-  if (isCapabilityAllowed(config, "ticket_delete")) {
-    server.registerTool(
-      "ninja_ticket_delete",
-      {
-        title: "Ticket: DELETE (permanent)",
-        description:
-          "Permanently delete a ticket. IRREVERSIBLE — for normal workflow use ninja_ticket_resolve instead. Requires confirm=\"DELETE\". Recommend dry_run=true first.",
-        inputSchema: z.object({
-          ticket_id: z.coerce.number().int().positive(),
-          confirm: confirmField("DELETE", "permanent ticket removal"),
-          dry_run: dryRunField
-        }).strict(),
-        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
-      },
-      async ({ ticket_id, dry_run }) => {
-        const target = await ninja.getTicket(ticket_id);
-        if (dry_run) {
-          return jsonResult(
-            dryRunPreview(`DELETE /ticketing/ticket/${ticket_id}`, { ticket_id }, {
-              ticket_id,
-              subject: target.subject,
-              client_id: target.clientId
-            })
-          );
-        }
-        await ninja.deleteTicket(ticket_id);
-        return jsonResult({ deleted: true, ticket_id, deleted_ticket: target });
-      }
-    );
-  }
 }
