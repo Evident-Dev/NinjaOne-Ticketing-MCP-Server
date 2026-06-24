@@ -14,7 +14,7 @@ export function registerLookupDomain({ server, ninja }: DomainContext): void {
         "Search organizations by name (fuzzy match). Returns matching org IDs and names. Use this FIRST when a user mentions a customer/client by name and you need the numeric organization_id (e.g. before creating a ticket). Read-only.",
       inputSchema: z.object({
         query: z.string().min(2).describe("Org/client name to search for"),
-        limit: z.number().int().min(1).max(50).default(10)
+        limit: z.coerce.number().int().min(1).max(50).default(10)
       }).strict(),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
     },
