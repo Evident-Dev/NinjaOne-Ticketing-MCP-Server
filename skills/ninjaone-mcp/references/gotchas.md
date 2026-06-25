@@ -23,20 +23,25 @@ that's #2. Don't use a product to record labor.
 
 ## `agreement_is_required`
 
-`ninja_billing_add_ticket_product` fails with this when the ticket's client has no agreement. As of
-this writing the tenant has **zero agreements configured tenant-wide**, so ticket products can't be
-created for anyone yet. When you hit this: record the charge as a note, and tell the user the client
-needs a billing agreement set up in NinjaOne first. (Again: time entries are unaffected.)
+`ninja_billing_add_ticket_product` fails with this when the ticket's client has no billing agreement.
+Check with `ninja_billing_list_agreements`; if the client (or the whole tenant) has none, ticket
+products can't be attached. When you hit this: record the charge as a note, and tell the user the
+client needs a billing agreement set up in NinjaOne first. (Time entries are unaffected — they log
+fine without an agreement.)
 
-## Current tenant state (verify if stale — this is point-in-time)
+## Discover tenant specifics with tools, don't assume them
 
-- `ninja_billing_list_agreements` → `[]` (no agreements).
-- `ninja_billing_list_products` → `[]` (no catalog products defined). So for billing, prefer the
-  free-form/adhoc path and time entries over `product_id`-based flows.
-- Region `us2`; scopes `monitoring management offline_access`.
-- Billing accounts that exist (for `add_ticket_product.account_id`): Hardware, Software, Labor
-  Billed, Ticket Time Entry, Managed Devices, Managed End User, Device Backup, User Product,
-  Product Group, Custom.
+Tenant configuration varies, so read it rather than hardcoding it:
+
+- **Region / connectivity / scopes** → `ninja_system_status`. (Writes need the `management` scope;
+  `monitoring` alone is read-only.)
+- **Billing accounts** (for `add_ticket_product.account_id`) → `ninja_billing_list_accounts`.
+  Typical names are Hardware, Software, Labor Billed, Ticket Time Entry, Managed Devices, Custom —
+  but always use the ids the tool returns.
+- **Agreements / catalog products** → `ninja_billing_list_agreements`, `ninja_billing_list_products`.
+  Some tenants have neither configured. When products and agreements are empty, prefer **time
+  entries** (which work without an agreement) and the **adhoc** product path over `product_id`-based
+  flows, and expect `agreement_is_required` when adding a product for a client with no agreement.
 
 ## Status: RESOLVE, don't CLOSE
 
@@ -73,21 +78,20 @@ ambiguous, `ninja_org_find` returns multiple — surface them and use the explic
 guessing. Domain-based lookup (`ninja_org_find_by_domain`) is the most reliable when you have an
 email address.
 
-## Verifying an endpoint against the live API
+## Reading NinjaOne errors
 
-If a call 404s or you're unsure a path exists, the authoritative spec is the tenant's own:
-`https://beardmangroup.rmmservices.net/apidocs/NinjaRMM-API-v2.json` (interactive docs at
-`https://beardmangroup.rmmservices.net/apidocs/?links.active=core`).
+The MCP server already targets the right tenant URL — you never need it. When a call fails, the
+NinjaOne error code tells you what kind of problem it is:
 
-With the user logged into that site, open it in Claude-in-Chrome and `fetch()` paths from the page
-context — the session cookie authorizes calls (paths work with or without the `/api` prefix, e.g.
-`/v2/billing/accounts`). The MCP server's own base is `https://us2.ninjarmm.com/api/v2`, so MCP code
-paths like `/billing/x` map to spec `/v2/billing/x`.
+- A **specific** code (e.g. `agreement_not_found`, `invoice_not_found`, `agreement_is_required`)
+  means the request reached the right endpoint — the issue is your input (wrong id) or a business
+  rule (missing agreement). Act on it.
+- A **generic** `{"resultCode":"FAILURE","errorMessage":"HTTP 404 Not Found"}` is unusual from these
+  tools and points at a server/path problem rather than your call — surface it instead of retrying
+  blindly.
 
-**The 404 diagnostic:** a NinjaOne 404 with a *specific* `resultCode` (e.g. `agreement_not_found`,
-`invoice_not_found`) means the route exists and the entity is just missing. A *generic*
-`{"resultCode":"FAILURE","errorMessage":"HTTP 404 Not Found"}` means the route itself is wrong.
-This is how the v0.9.1 path corrections were found.
+If you're unsure the MCP can reach NinjaOne at all, `ninja_system_status` confirms connectivity,
+region, and scopes.
 
 ## Numeric arguments
 
