@@ -97,15 +97,14 @@ cases and example payloads, are in **[references/workflows.md](references/workfl
 
 Before concluding "the API can't do X" or debugging a confusing error, check
 **[references/gotchas.md](references/gotchas.md)**. It covers the billing model in depth, the
-`agreement_is_required` constraint, the error-code diagnostic (specific code = route OK, generic
-`FAILURE`/HTTP 404 = wrong route), destructive-op gating and confirm tokens, current tenant state
-(no agreements/products configured yet), units (`time_tracked` is seconds), and how to verify an
-endpoint against the live API spec.
+`agreement_is_required` constraint, how to read NinjaOne's error codes, destructive-op gating and
+confirm tokens, units (`time_tracked` is seconds), and how to discover tenant specifics with tools
+rather than assuming them.
 
-## When something 404s or behaves oddly
+## When a call errors or behaves oddly
 
-The authoritative API spec and a live-verification method are documented in gotchas.md. In short:
-the tenant's own OpenAPI spec lives at `https://beardmangroup.rmmservices.net/apidocs/NinjaRMM-API-v2.json`,
-and you can validate any path by `fetch()`-ing it from that logged-in apidocs page (Claude-in-Chrome).
-A *specific* NinjaOne error code means the route is right; a *generic* `HTTP 404 Not Found` means the
-path is wrong.
+You don't need any API URL — the MCP server is already pointed at the right tenant. Read the error
+NinjaOne returns: a *specific* code (e.g. `agreement_not_found`, `agreement_is_required`) means the
+request reached the right place and the problem is the data or a business rule; a *generic*
+`HTTP 404 Not Found` / `FAILURE` is unusual and points at the server, not your call. Run
+`ninja_system_status` to confirm the MCP can reach NinjaOne and which tenant/region you're on.

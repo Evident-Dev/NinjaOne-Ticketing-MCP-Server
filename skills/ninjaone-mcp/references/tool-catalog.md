@@ -91,11 +91,11 @@ Scopes note: writes require the `management` scope; `monitoring` alone is read-o
 
 | Tool | Input | Returns / notes |
 |---|---|---|
-| `ninja_billing_list_agreements` | `{ organization_id? }` | Contracts. Empty tenant-wide today (no agreements configured). |
+| `ninja_billing_list_agreements` | `{ organization_id? }` | Contracts. May be empty if the tenant has none configured. |
 | `ninja_billing_get_agreement` | `{ agreement_id }` | One agreement + line items. |
 | `ninja_billing_list_invoices` | `{ organization_id?, status? }` | Invoices; `status` e.g. DRAFT/SENT/PAID. |
 | `ninja_billing_get_invoice` | `{ invoice_id }` | One invoice + line items. |
-| `ninja_billing_list_products` | — | Catalog products. Empty today (none defined). |
+| `ninja_billing_list_products` | — | Catalog products. May be empty if none are defined. |
 | `ninja_billing_list_accounts` | — | Billing accounts (Hardware, Software, Labor Billed, Ticket Time Entry, Managed Devices, Custom, …). The `id` is the `account_id` for `add_ticket_product`. |
 | `ninja_billing_list_ticket_time` | `{ ticket_id }` | Billable **time entries** logged on a ticket (from the ticket log). Use this to confirm logged labor. |
 | `ninja_billing_list_ticket_products` | `{ ticket_id }` | **Product** line items on a ticket (parts/charges — distinct from time). |
