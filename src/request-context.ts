@@ -6,7 +6,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
 export type AuthMode =
-  | { kind: "technician"; email: string; name?: string }
+  | { kind: "technician"; email: string; name?: string; token: string }
   | { kind: "shared-secret" }
   | { kind: "open" };
 
