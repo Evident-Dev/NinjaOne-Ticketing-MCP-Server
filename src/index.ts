@@ -22,8 +22,8 @@ import type { DomainRegister } from "./domains/common.js";
 const SERVER_VERSION = "0.9.0";
 
 const config = loadConfig();
-const ninja = new NinjaClient(config);
 const technicianDb = config.databaseUrl ? new TechnicianDb(config.databaseUrl) : null;
+const ninja = new NinjaClient(config, technicianDb);
 const technicianStore = new TechnicianStore(config, technicianDb, ninja);
 
 // Slice = the set of domain registers that get attached to an MCP endpoint.
@@ -149,10 +149,10 @@ app.get("/debug/test-ninja", requireSharedSecret, requireConfigured, async (_req
 
 // ── User-OAuth routes (one-time browser login to bootstrap ticket writes) ────
 
-const authRoutes = buildAuthRoutes(config, ninja.userOAuth);
-app.get("/auth/login", authRoutes.requireSharedSecret, requireConfigured, authRoutes.handleLogin);
+const authRoutes = buildAuthRoutes(config, ninja.userOAuth, technicianStore);
+app.get("/auth/login", requireConfigured, authRoutes.requireLoginIdentity, authRoutes.handleLogin);
 app.get("/auth/callback", requireConfigured, authRoutes.handleCallback);
-app.get("/auth/status", authRoutes.requireSharedSecret, requireConfigured, authRoutes.handleStatus);
+app.get("/auth/status", requireConfigured, authRoutes.requireLoginIdentity, authRoutes.handleStatus);
 
 // Mount one MCP endpoint per slice. Each endpoint exposes only the tools its
 // slice covers — clients add whichever URL matches their workflow.
@@ -261,36 +261,34 @@ app.listen(config.port, async () => {
     console.warn("");
   }
 
-  // Status of user-context auth — loud banner if not signed in yet.
-  const authed = await ninja.userOAuth.isAuthenticated();
-  if (!authed) {
-    console.warn("");
-    console.warn("============================================================");
-    console.warn("  NinjaOne USER LOGIN REQUIRED for ticket writes");
-    console.warn("============================================================");
-    console.warn("  Reads (orgs, devices, alerts) work now via machine token.");
-    console.warn("  Ticket writes (create, update, comment) need a one-time");
-    console.warn("  browser sign-in. Open this URL in a browser:");
-    console.warn("");
-    console.warn(`    ${ninja.userOAuth.loginUrl()}`);
-    console.warn("");
-    console.warn("  After sign-in the refresh token persists at:");
-    console.warn(`    ${config.userTokenPath}`);
-    console.warn("  Mount a Railway Volume at /data so it survives redeploys.");
-    console.warn("============================================================");
-    console.warn("");
-  } else {
-    const status = await ninja.userOAuth.getStatus();
+  // Each tech signs in to NinjaOne through their own link:
+  //   /auth/login?token=<their personal token>
+  // Shared-secret (admin) requests use the shared sign-in below.
+  if (technicianDb) {
+    try {
+      const signedIn = await technicianDb.listNinjaLoginEmails();
+      console.log(
+        `[ninja-oauth] ${signedIn.length} technician NinjaOne sign-in(s) on file${
+          signedIn.length > 0 ? `: ${signedIn.join(", ")}` : ""
+        }`
+      );
+    } catch (err) {
+      console.error("[ninja-oauth] couldn't list technician sign-ins:", (err as Error).message);
+    }
+  }
+  const sharedSession = ninja.userOAuth.sessionFor({ kind: "shared" });
+  if (await sharedSession.isAuthenticated()) {
+    const status = await sharedSession.getStatus();
     console.log(
-      `[ninja-oauth] user-context token loaded (saved ${status.token_age_days}d ago, last refreshed ${
+      `[ninja-oauth] shared (admin) sign-in loaded (saved ${status.token_age_days}d ago, last refreshed ${
         status.days_since_last_refresh ?? "?"
-      }d ago)`
+      }d ago). Only shared-secret requests use it.`
     );
   }
 
-  // Background keepalive: refresh the user token every 12 hours so the refresh
-  // chain stays warm during quiet periods.
-  ninja.userOAuth.startKeepalive();
+  // Background keepalive: refresh every stored sign-in every 12 hours so the
+  // refresh chains stay warm during quiet periods.
+  ninja.userOAuth.startKeepalive(() => technicianStore.emails());
 });
 
 // ── Endpoint wiring ──────────────────────────────────────────────────────────
@@ -391,7 +389,8 @@ async function requireMcpAuth(req: Request, res: Response, next: NextFunction): 
       (req as Request & { mcpAuth?: AuthMode }).mcpAuth = {
         kind: "technician",
         email: tech.email,
-        name: tech.name
+        name: tech.name,
+        token: tech.token
       };
       next();
       return;

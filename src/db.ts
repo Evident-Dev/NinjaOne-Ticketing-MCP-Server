@@ -18,6 +18,15 @@ export interface TechnicianRow {
   last_seen_at: Date | null;
 }
 
+export interface NinjaLoginRow {
+  technician_email: string;
+  refresh_token: string;
+  base_url: string;
+  scope: string | null;
+  saved_at: Date;
+  last_refreshed_at: Date | null;
+}
+
 export class TechnicianDb {
   private pool: pg.Pool;
 
@@ -67,7 +76,63 @@ export class TechnicianDb {
       );
       CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(ts DESC);
       CREATE INDEX IF NOT EXISTS idx_audit_log_actor ON audit_log(actor_email);
+
+      -- One NinjaOne sign-in per technician, so writes are authored as them.
+      CREATE TABLE IF NOT EXISTS technician_ninja_logins (
+        technician_email  TEXT PRIMARY KEY,
+        refresh_token     TEXT NOT NULL,
+        base_url          TEXT NOT NULL,
+        scope             TEXT,
+        saved_at          TIMESTAMPTZ NOT NULL,
+        last_refreshed_at TIMESTAMPTZ
+      );
     `);
+  }
+
+  async loadNinjaLogin(technicianEmail: string): Promise<NinjaLoginRow | null> {
+    const result = await this.pool.query<NinjaLoginRow>(
+      `SELECT technician_email, refresh_token, base_url, scope, saved_at, last_refreshed_at
+       FROM technician_ninja_logins
+       WHERE technician_email = $1`,
+      [technicianEmail.toLowerCase()]
+    );
+    return result.rows[0] ?? null;
+  }
+
+  async saveNinjaLogin(login: {
+    technicianEmail: string;
+    refreshToken: string;
+    baseUrl: string;
+    scope?: string;
+    savedAt: Date;
+    lastRefreshedAt?: Date;
+  }): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO technician_ninja_logins
+         (technician_email, refresh_token, base_url, scope, saved_at, last_refreshed_at)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (technician_email) DO UPDATE
+         SET refresh_token = EXCLUDED.refresh_token,
+             base_url = EXCLUDED.base_url,
+             scope = EXCLUDED.scope,
+             saved_at = EXCLUDED.saved_at,
+             last_refreshed_at = EXCLUDED.last_refreshed_at`,
+      [
+        login.technicianEmail.toLowerCase(),
+        login.refreshToken,
+        login.baseUrl,
+        login.scope ?? null,
+        login.savedAt,
+        login.lastRefreshedAt ?? null
+      ]
+    );
+  }
+
+  async listNinjaLoginEmails(): Promise<string[]> {
+    const result = await this.pool.query<{ technician_email: string }>(
+      `SELECT technician_email FROM technician_ninja_logins ORDER BY technician_email`
+    );
+    return result.rows.map((row) => row.technician_email);
   }
 
   async writeAudit(entry: {

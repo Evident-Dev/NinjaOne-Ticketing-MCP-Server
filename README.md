@@ -45,11 +45,11 @@ Fork this repository (or push your own copy) to GitHub. Railway will deploy from
    | Variable | Required? | Value |
    |---|---|---|
    | `NINJA_REGION` | Recommended | `us`, `eu`, `oc`, `ca`, `us2`, or `fed` — see region table below |
-   | `MCP_SHARED_SECRET` | **Yes for production** | Long random string. Used for `/mcp/*` Bearer auth AND as the `?token=` query param on `/auth/login`. Generate with `openssl rand -hex 32`. |
+   | `MCP_SHARED_SECRET` | **Yes for production** | Long random string. Admin / fallback `/mcp/*` Bearer token, and the `?token=` for the shared (admin) NinjaOne sign-in at `/auth/login`. Generate with `openssl rand -hex 32`. |
    | `TECHNICIAN_EMAIL` | Optional | Your NinjaOne login email — comments are signed with your display name and tickets default to you as assignee |
    | `DEFAULT_TICKET_FORM_ID` | Optional | Numeric ID of your default ticket form. Find it via `ninja_ticket_list_forms` after sign-in. |
    | `PUBLIC_BASE_URL` | Auto | Railway sets `RAILWAY_PUBLIC_DOMAIN` automatically once a domain is generated — we derive the base URL from it. Only set this manually if you need to override. |
-   | `USER_TOKEN_PATH` | Default `/data/refresh-token.json` | Path inside the container where the refresh token is persisted. Must be inside a mounted volume. |
+   | `USER_TOKEN_PATH` | Default `/data/refresh-token.json` | Where the shared (admin) sign-in is persisted. Technician sign-ins live in Postgres, or next to this file when there's no database. Must be inside a mounted volume. |
    | `NINJA_BASE_URL` | Only for whitelabel | Full base URL if not using a stock region |
    | `NINJA_ALLOW_DESTRUCTIVE` | Optional | CSV of destructive-tool capability keys to enable. Empty = no destructive tools. Recommended: `ticket_delete,alert_reset_all`. Add `device_delete` only if you really need it. |
 
@@ -113,21 +113,26 @@ Now that you have your Railway domain, create the API app in NinjaOne:
 
 ### Step 5 — Sign in to NinjaOne (one-time)
 
-The ticket-write endpoints need a user-context OAuth token. You do the browser sign-in once and the server keeps the token refreshed forever.
+The ticket-write endpoints need a user-context OAuth token. NinjaOne records whoever signed in as the author of tickets and comments, so **each technician signs in once as themselves**. The server keeps every sign-in refreshed.
 
-1. **Open this URL in a browser** (replace `<SECRET>` with your `MCP_SHARED_SECRET`):
+1. **Open this URL in a browser**, using your personal token (the one in your connector URL):
    ```
-   https://<your-domain>/auth/login?token=<SECRET>
+   https://<your-domain>/auth/login?token=<YOUR_PERSONAL_TOKEN>
    ```
-2. You'll be redirected to NinjaOne's consent screen. Sign in with your normal NinjaOne account and approve.
-3. NinjaOne redirects back; you'll see a "Connected to NinjaOne ✓" page.
-4. The refresh token is now persisted at `/data/refresh-token.json` and will be auto-renewed forever.
+   Use a private window if your browser is already signed in to NinjaOne as someone else.
+2. You'll be redirected to NinjaOne's consent screen. Sign in with your own NinjaOne account and approve.
+3. NinjaOne redirects back; you'll see a "Connected to NinjaOne ✓" page naming your email.
+4. Your refresh token is stored in the Postgres `technician_ninja_logins` table (or `/data/refresh-token.<email>.json` with no database) and auto-renewed.
+
+Writes from your connector only ever use your sign-in. If you haven't signed in yet, writes fail with your personal sign-in link instead of using someone else's.
+
+Using `?token=<MCP_SHARED_SECRET>` instead signs in the shared (admin) login at `/data/refresh-token.json`. Only requests made with the shared secret use it.
 
 Verify by visiting:
 ```
-https://<your-domain>/auth/status?token=<SECRET>
+https://<your-domain>/auth/status?token=<YOUR_PERSONAL_TOKEN>
 ```
-You should see `{ "authenticated": true, "saved_at": "...", ... }`.
+You should see `{ "authenticated": true, "signed_in_for": "<your email>", ... }`.
 
 **Re-authentication is rare.** The background keepalive refreshes the token every 12 hours, so as long as the server stays up the token never expires. If NinjaOne ever invalidates it (e.g. you revoke API access), the next write will fail with a clear "re-authorize" message and you just revisit `/auth/login`.
 
@@ -317,10 +322,13 @@ curl http://localhost:3000/debug/test-ninja
 You forgot to send the `Authorization: Bearer <MCP_SHARED_SECRET>` header, or it doesn't match the env var.
 
 **Ticket create returns "No NinjaOne user-context login on file"**
-You haven't done the one-time browser sign-in yet. Open `/auth/login?token=<MCP_SHARED_SECRET>` and complete it. After that, ticket writes will work indefinitely.
+You haven't done your one-time browser sign-in yet. Open `/auth/login?token=<YOUR_PERSONAL_TOKEN>` and complete it. After that, ticket writes will work indefinitely.
 
 **Ticket create returns "NinjaOne refresh-token exchange failed"**
-Your refresh token expired or was revoked. Re-do the browser sign-in at `/auth/login?token=<MCP_SHARED_SECRET>`.
+Your refresh token expired or was revoked. Re-do the browser sign-in at `/auth/login?token=<YOUR_PERSONAL_TOKEN>`.
+
+**Tickets or comments show the wrong technician as author**
+The NinjaOne account that signed in at `/auth/login` is the author. Re-do the sign-in with your personal token in a private window, and make sure you sign in to NinjaOne as yourself.
 
 **Token vanishes on every redeploy**
 You don't have a Railway Volume mounted at `/data`. Add one (Settings → Volumes → New Volume → mount path `/data`). The token will then survive redeploys.
@@ -362,9 +370,9 @@ If your NinjaOne hostname isn't on the regional list, leave `NINJA_REGION` unset
 
 - One Node process serves all endpoints.
 - One shared `NinjaClient` (in `src/ninja.ts`) handles both auth flows and request-level errors.
-- `UserOAuth` (in `src/user-oauth.ts`) owns the user-context refresh-token lifecycle, including immediate persistence of rotated tokens via atomic file writes.
+- `UserOAuth` (in `src/user-oauth.ts`) owns the user-context refresh-token lifecycle: one sign-in per technician (Postgres) plus a shared admin sign-in (file), picked per request from the URL token. Rotated tokens are persisted immediately.
 - Each `/mcp/<slice>` endpoint builds a fresh `McpServer` per request and registers only that slice's tool set. Stateless. No cross-request session bookkeeping.
-- Background keepalive refreshes the user-context token every 12 hours so it never goes stale during quiet periods.
+- Background keepalive refreshes every stored sign-in every 12 hours so none go stale during quiet periods.
 - Destructive tools are conditionally registered based on `NINJA_ALLOW_DESTRUCTIVE`. Every non-GET request goes through an audit hook that writes to the Postgres `audit_log` table.
 
 ```

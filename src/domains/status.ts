@@ -66,19 +66,24 @@ export function registerStatusDomain({ server, ninja, config }: DomainContext): 
     {
       title: "System: NinjaOne User-OAuth Status",
       description:
-        "Check whether a user-context refresh token is on file (required for ticket writes, comments, and updates). Always returns the login_url. " +
-        "If `authenticated` is false, instruct the user to open `login_url` in a browser and sign in to NinjaOne, then retry their request.",
+        "Check whether the CURRENT connection's technician has a NinjaOne sign-in on file (required for ticket writes, comments, and updates). " +
+        "Each technician has their own sign-in, so writes are authored as them. Always returns the login_url. " +
+        "If `authenticated` is false, instruct the user to open `login_url` in a browser and sign in to NinjaOne as `signed_in_for`, then retry their request.",
       inputSchema: z.object({}).strict(),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
     },
     async () => {
-      const status = await ninja.userOAuth.getStatus();
+      const session = ninja.userOAuth.currentSession();
+      if (!session) {
+        return jsonResult({ authenticated: false, message: "No request identity for this call." });
+      }
+      const status = await session.getStatus();
       return jsonResult({
         ...status,
-        login_url: ninja.userOAuth.loginUrl(),
+        login_url: ninja.userOAuth.loginUrl(session.identity),
         message: status.authenticated
-          ? "User-context token is active. Ticket writes should work."
-          : "No user-context token on file. Ticket writes will fail. ASK THE USER to visit login_url in a browser to sign in once."
+          ? `NinjaOne sign-in is active for ${status.signed_in_for}. Ticket writes will be authored as that account.`
+          : `No NinjaOne sign-in on file for ${status.signed_in_for}. Ticket writes will fail. ASK THE USER to visit login_url in a browser (a private window avoids signing in as someone else) and sign in once.`
       });
     }
   );

@@ -1,10 +1,12 @@
 // Browser-based OAuth bootstrap routes.
 //
 // Flow:
-//   1. Admin visits GET /auth/login?token=<MCP_SHARED_SECRET>
-//   2. We generate a state, store it briefly, and 302 to NinjaOne /ws/oauth/authorize
+//   1. Tech visits GET /auth/login?token=<their personal token>
+//      (or an admin with ?token=<MCP_SHARED_SECRET> for the shared sign-in)
+//   2. We generate a state tied to that identity, and 302 to NinjaOne /ws/oauth/authorize
 //   3. User signs in to NinjaOne, NinjaOne 302s back to /auth/callback?code=...&state=...
-//   4. We verify the state, exchange the code for tokens, persist refresh_token
+//   4. We verify the state, exchange the code for tokens, and store the
+//      refresh_token under the identity from step 1
 //   5. Show "Connected" success page
 //
 // The state cache is in-memory and short-TTL — only needed for the OAuth dance.
@@ -12,57 +14,91 @@
 import type { NextFunction, Request, Response } from "express";
 import { randomBytes } from "node:crypto";
 import type { AppConfig } from "./config.js";
-import { UserOAuth, UserOAuthError } from "./user-oauth.js";
+import type { TechnicianStore } from "./technician-store.js";
+import { UserOAuth, UserOAuthError, type LoginIdentity } from "./user-oauth.js";
 
 const STATE_TTL_MS = 10 * 60 * 1000;
 
-class StateCache {
-  private states = new Map<string, number>();
+interface PendingLogin {
+  identity: LoginIdentity;
+  expiresAt: number;
+}
 
-  create(): string {
+class StateCache {
+  private states = new Map<string, PendingLogin>();
+
+  create(identity: LoginIdentity): string {
     this.gc();
     const state = randomBytes(32).toString("hex");
-    this.states.set(state, Date.now() + STATE_TTL_MS);
+    this.states.set(state, { identity, expiresAt: Date.now() + STATE_TTL_MS });
     return state;
   }
 
-  consume(state: string): boolean {
+  consume(state: string): LoginIdentity | undefined {
     this.gc();
-    const expiresAt = this.states.get(state);
-    if (!expiresAt) return false;
+    const pending = this.states.get(state);
+    if (!pending) return undefined;
     this.states.delete(state);
-    return expiresAt > Date.now();
+    return pending.expiresAt > Date.now() ? pending.identity : undefined;
   }
 
   private gc(): void {
     const now = Date.now();
-    for (const [state, expiresAt] of this.states.entries()) {
-      if (expiresAt <= now) this.states.delete(state);
+    for (const [state, pending] of this.states.entries()) {
+      if (pending.expiresAt <= now) this.states.delete(state);
     }
   }
 }
 
-export function buildAuthRoutes(config: AppConfig, userOAuth: UserOAuth) {
+type RequestWithLoginIdentity = Request & { loginIdentity?: LoginIdentity };
+
+export function buildAuthRoutes(
+  config: AppConfig,
+  userOAuth: UserOAuth,
+  technicianStore: TechnicianStore
+) {
   const stateCache = new StateCache();
 
-  function requireSharedSecret(req: Request, res: Response, next: NextFunction): void {
-    if (!config.mcpSharedSecret) {
-      next();
-      return;
-    }
-    const headerToken = req.header("authorization")?.replace(/^Bearer\s+/i, "");
-    const queryToken = typeof req.query.token === "string" ? req.query.token : undefined;
-    if (headerToken !== config.mcpSharedSecret && queryToken !== config.mcpSharedSecret) {
+  // Works out whose sign-in this is from the presented token: a tech's
+  // personal token, or the shared secret for the shared sign-in.
+  async function requireLoginIdentity(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const headerToken = req.header("authorization")?.replace(/^Bearer\s+/i, "");
+      const queryToken = typeof req.query.token === "string" ? req.query.token : undefined;
+      const presented = headerToken ?? queryToken;
+      const request = req as RequestWithLoginIdentity;
+
+      if (presented) {
+        const technician = await technicianStore.findWithRefresh(presented);
+        if (technician) {
+          request.loginIdentity = { kind: "technician", email: technician.email, token: technician.token };
+          next();
+          return;
+        }
+        if (config.mcpSharedSecret && presented === config.mcpSharedSecret) {
+          request.loginIdentity = { kind: "shared" };
+          next();
+          return;
+        }
+      }
+
+      // Local dev: no auth configured at all.
+      if (!config.mcpSharedSecret && technicianStore.size() === 0) {
+        request.loginIdentity = { kind: "shared" };
+        next();
+        return;
+      }
+
       res.status(401).send(landingPage(
         "Unauthorized",
-        `<p>Append <code>?token=&lt;MCP_SHARED_SECRET&gt;</code> to this URL to start the NinjaOne sign-in flow.</p>`
+        `<p>Append <code>?token=&lt;your personal token&gt;</code> to this URL to start the NinjaOne sign-in flow.</p>`
       ));
-      return;
+    } catch (error) {
+      next(error);
     }
-    next();
   }
 
-  async function handleLogin(_req: Request, res: Response, next: NextFunction): Promise<void> {
+  async function handleLogin(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       if (!config.oauthRedirectUri) {
         res
@@ -70,7 +106,7 @@ export function buildAuthRoutes(config: AppConfig, userOAuth: UserOAuth) {
           .send(landingPage("Missing OAuth redirect URI", `<p>Set <code>PUBLIC_BASE_URL</code> or <code>OAUTH_REDIRECT_URI</code> in Railway → Variables, then redeploy.</p>`));
         return;
       }
-      const state = stateCache.create();
+      const state = stateCache.create((req as RequestWithLoginIdentity).loginIdentity!);
       const url = userOAuth.buildAuthorizeUrl(state);
       res.redirect(url);
     } catch (err) {
@@ -86,7 +122,7 @@ export function buildAuthRoutes(config: AppConfig, userOAuth: UserOAuth) {
       >;
       if (error) {
         res.status(400).send(
-          landingPage("NinjaOne returned an error", `<p><strong>${error}</strong></p><p>${error_description ?? ""}</p>`)
+          landingPage("NinjaOne returned an error", `<p><strong>${escapeHtml(error)}</strong></p><p>${escapeHtml(error_description ?? "")}</p>`)
         );
         return;
       }
@@ -94,19 +130,20 @@ export function buildAuthRoutes(config: AppConfig, userOAuth: UserOAuth) {
         res.status(400).send(landingPage("Missing code or state", `<p>Restart the sign-in from <code>/auth/login</code>.</p>`));
         return;
       }
-      if (!stateCache.consume(state)) {
+      const identity = stateCache.consume(state);
+      if (!identity) {
         res.status(400).send(
           landingPage("Invalid or expired state", `<p>The sign-in took too long or was opened in a different browser. Restart from <code>/auth/login</code>.</p>`)
         );
         return;
       }
-      await userOAuth.exchangeAuthorizationCode(code);
-      const status = await userOAuth.getStatus();
+      const session = await userOAuth.exchangeAuthorizationCode(code, identity);
+      const status = await session.getStatus();
       res.send(
         landingPage(
           "Connected to NinjaOne ✓",
-          `<p>The MCP server now has a user-context refresh token. Ticket writes, comments, and updates will work.</p>
-           <p>Token saved at <code>${escapeHtml(status.token_storage_path)}</code>.</p>
+          `<p>Ticket writes, comments, and updates for <strong>${escapeHtml(status.signed_in_for)}</strong> will now use this NinjaOne sign-in.</p>
+           <p>Token saved at <code>${escapeHtml(status.token_storage)}</code>.</p>
            <p><small>You can close this window and retry your action in Claude.</small></p>`
         )
       );
@@ -119,19 +156,20 @@ export function buildAuthRoutes(config: AppConfig, userOAuth: UserOAuth) {
     }
   }
 
-  async function handleStatus(_req: Request, res: Response, next: NextFunction): Promise<void> {
+  async function handleStatus(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const status = await userOAuth.getStatus();
+      const identity = (req as RequestWithLoginIdentity).loginIdentity!;
+      const status = await userOAuth.sessionFor(identity).getStatus();
       res.json({
         ...status,
-        login_url: userOAuth.loginUrl()
+        login_url: userOAuth.loginUrl(identity)
       });
     } catch (err) {
       next(err);
     }
   }
 
-  return { requireSharedSecret, handleLogin, handleCallback, handleStatus };
+  return { requireLoginIdentity, handleLogin, handleCallback, handleStatus };
 }
 
 function escapeHtml(s: string): string {

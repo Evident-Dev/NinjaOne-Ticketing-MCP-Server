@@ -78,8 +78,8 @@ export class NinjaClient {
   readonly userOAuth: UserOAuth;
   private auditDb: TechnicianDb | null = null;
 
-  constructor(private readonly config: AppConfig) {
-    this.userOAuth = new UserOAuth(config);
+  constructor(private readonly config: AppConfig, database: TechnicianDb | null = null) {
+    this.userOAuth = new UserOAuth(config, database);
   }
 
   /** Wire the Postgres handle in once it's bootstrapped. Audit writes are
@@ -102,10 +102,11 @@ export class NinjaClient {
   //  - For read requests with no user token, fall back to client_credentials.
 
   private async getAccessToken(requireUserContext: boolean): Promise<string> {
-    // User-context token takes precedence whenever it's available.
-    if (await this.userOAuth.isAuthenticated()) {
+    // Only the caller's own sign-in is used, never another tech's.
+    const session = this.userOAuth.currentSession();
+    if (session && (await session.isAuthenticated())) {
       try {
-        return await this.userOAuth.getAccessToken();
+        return await session.getAccessToken();
       } catch (err) {
         if (err instanceof UserOAuthError && err.kind === "refresh-failed") {
           // The refresh token expired/was revoked. For writes we MUST surface
@@ -119,11 +120,10 @@ export class NinjaClient {
         }
       }
     } else if (requireUserContext) {
+      if (session) throw session.noLoginError();
       throw new UserOAuthError(
-        `NinjaOne ticket-write operations require a one-time browser login. ` +
-          this.userOAuth.loginInstructions(),
-        "no-token",
-        this.userOAuth.loginUrl()
+        "NinjaOne ticket-write operations need a signed-in technician, and this call has no request identity.",
+        "no-token"
       );
     }
 
@@ -187,7 +187,7 @@ export class NinjaClient {
 
   invalidateToken(): void {
     this.machineToken = undefined;
-    this.userOAuth.invalidateAccessToken();
+    this.userOAuth.currentSession()?.invalidateAccessToken();
   }
 
   // ── Smoke test ────────────────────────────────────────────────────────────
